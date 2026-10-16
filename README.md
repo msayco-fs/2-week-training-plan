@@ -248,7 +248,7 @@ do not cover token validation or the JWT claim mapping.
 
 ## CI and pull requests
 
-`.github/workflows/ci.yml` runs on pull requests to `main`, pushes to `main`
+`.github/workflows/ci.yml` runs on every pull request, pushes to `main`
 and manual dispatch:
 
 - **Backend:** restore, build (Release), test, upload the `.trx` results,
