@@ -1,14 +1,14 @@
 # Repository settings for administrators
 
-These settings need admin access on the Git host. When this file was written
-they were **not applied**: the local repository had no remote, and the GitHub
-CLI (`gh`) was not installed. Apply them after the repository is pushed.
+These settings need admin access on the Git host. The repository is hosted at
+<https://github.com/msayco-fs/2-week-training-plan>. Branch protection on a
+private repository needs GitHub Pro, Team or Enterprise.
 
 ## 1. Create the remote and push
 
 ```bash
-git remote add origin https://github.com/<owner>/<repo>.git
-git push -u origin main
+git remote add origin https://github.com/msayco-fs/2-week-training-plan.git
+git push -u origin <branch>
 ```
 
 ## 2. Let CI run once
@@ -74,7 +74,9 @@ JSON
   contents"; require approval for workflows from first-time contributors.
 - **Settings → Code security**: turn on Dependabot alerts and secret scanning
   with push protection.
-- Keep the repository **private**. It contains an intentional vulnerability.
+- Prefer a **private** repository, because it contains an intentional
+  vulnerability. If the repository is public, never deploy the code, and
+  keep the warning at the top of the README.
 
 ## 5. Verify
 
