@@ -1,7 +1,9 @@
 using InvoiceReporting.Api.Data;
 using InvoiceReporting.Api.Reporting;
+using InvoiceReporting.Api.Security;
 using InvoiceReporting.Api.Tenancy;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -23,7 +25,12 @@ builder.Services.AddScoped<IInvoiceReportService, InvoiceReportService>();
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer();
-builder.Services.AddAuthorization();
+
+builder.Services.AddSingleton<IAuthorizationHandler, TenantAccessHandler>();
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy(AuthorizationPolicies.TenantAccess, policy => policy
+        .RequireAuthenticatedUser()
+        .AddRequirements(new TenantAccessRequirement()));
 
 var app = builder.Build();
 

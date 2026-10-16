@@ -30,7 +30,7 @@ public sealed partial class TenantResolver(ReportingDbContext db) : ITenantResol
             .Select(t => new ResolvedTenant(t.Id, t.Key))
             .SingleOrDefaultAsync(cancellationToken);
 
-        return tenant is null ? TenantResolutionResult.NotFound : TenantResolutionResult.Success(tenant);
+        return tenant is null ? TenantResolutionResult.NotFound(normalizedKey) : TenantResolutionResult.Success(tenant);
     }
 
     [GeneratedRegex("^[a-z0-9][a-z0-9-]{0,31}$", RegexOptions.CultureInvariant)]

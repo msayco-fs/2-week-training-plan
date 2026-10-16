@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using InvoiceReporting.Api.Reporting;
+using InvoiceReporting.Api.Security;
 using InvoiceReporting.Api.Tenancy;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -11,6 +12,7 @@ namespace InvoiceReporting.Api.Controllers;
 [Authorize]
 public sealed class InvoiceReportController(
     ITenantResolver tenantResolver,
+    IAuthorizationService authorizationService,
     IInvoiceReportService reportService) : ControllerBase
 {
     /// <summary>Returns the invoices issued in <paramref name="month"/> for the requested tenant.</summary>
@@ -21,6 +23,7 @@ public sealed class InvoiceReportController(
     [ProducesResponseType<MonthlyInvoiceReport>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<MonthlyInvoiceReport>> GetMonthly(
         [FromQuery] string? month,
@@ -36,34 +39,29 @@ public sealed class InvoiceReportController(
         }
 
         var resolution = await tenantResolver.ResolveAsync(dealerId, cancellationToken);
-        switch (resolution.Status)
+        if (resolution.TenantKey is null)
         {
-            case TenantResolutionStatus.Missing:
-            case TenantResolutionStatus.Malformed:
-                return Problem(
-                    statusCode: StatusCodes.Status400BadRequest,
-                    title: $"A valid {TenantResolver.TenantHeaderName} header is required.");
-            case TenantResolutionStatus.NotFound:
-                return Problem(statusCode: StatusCodes.Status404NotFound, title: "Tenant not found.");
+            return Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: $"A valid {TenantResolver.TenantHeaderName} header is required.");
         }
 
-        var tenant = resolution.Tenant!;
+        // Authorize before revealing whether the tenant exists, so a caller
+        // cannot use 404 versus 403 to discover other tenants' keys.
+        var authorization = await authorizationService.AuthorizeAsync(
+            User, new TenantScope(resolution.TenantKey), AuthorizationPolicies.TenantAccess);
+        if (!authorization.Succeeded)
+        {
+            return Forbid();
+        }
 
-        // ---------------------------------------------------------------------
-        // TRAINING VULNERABILITY (intentional, corrected in Phase 2)
-        // Broken object-level authorization between tenants (OWASP API1:2023).
-        //
-        // The caller is authenticated, but nothing checks that the tenant they
-        // asked for in the X-Dealer-Id header matches the tenant_id claim in
-        // their identity. Any authenticated user of any dealer can read any
-        // other dealer's invoices by changing the header value.
-        //
-        // Phase 2 fix: authorize the resolved tenant against the caller's
-        // tenant_id claim (with a PlatformAdmin role bypass) BEFORE this call.
-        // See docs/training/phase-1-vulnerability.md.
-        // ---------------------------------------------------------------------
+        if (resolution.Tenant is null)
+        {
+            return Problem(statusCode: StatusCodes.Status404NotFound, title: "Tenant not found.");
+        }
+
         var report = await reportService.GetMonthlyReportAsync(
-            tenant,
+            resolution.Tenant,
             reportingMonth,
             User.FindFirstValue(ClaimTypes.NameIdentifier),
             cancellationToken);

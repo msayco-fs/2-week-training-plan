@@ -32,10 +32,15 @@ public sealed class TestAuthHandler(
 
         var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, subject) };
 
-        var tenant = Request.Headers[TenantHeader].ToString();
-        if (!string.IsNullOrEmpty(tenant))
+        // Comma-separated values become separate tenant_id claims, and a present
+        // but empty header becomes one empty claim, so tests can exercise the
+        // ambiguous and blank-claim cases.
+        if (Request.Headers.TryGetValue(TenantHeader, out var tenantValues))
         {
-            claims.Add(new Claim(Security.TenantClaimTypes.TenantId, tenant));
+            foreach (var tenant in tenantValues.ToString().Split(','))
+            {
+                claims.Add(new Claim(Security.TenantClaimTypes.TenantId, tenant.Trim()));
+            }
         }
 
         foreach (var role in Request.Headers[RolesHeader].ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))

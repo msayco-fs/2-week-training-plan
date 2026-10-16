@@ -8,7 +8,9 @@ public static class HttpRequestBuilder
 
     /// <summary>
     /// Builds a monthly report request. A null <paramref name="subject"/> sends no
-    /// identity; a null <paramref name="dealerId"/> omits the tenant header.
+    /// identity; a null <paramref name="dealerId"/> omits the tenant header; a null
+    /// <paramref name="tenantClaim"/> gives the identity no tenant_id claim, and a
+    /// comma-separated value gives it several.
     /// </summary>
     public static HttpRequestMessage MonthlyReport(
         string? month,
