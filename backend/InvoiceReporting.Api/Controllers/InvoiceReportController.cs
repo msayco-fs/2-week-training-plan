@@ -28,6 +28,7 @@ public sealed class InvoiceReportController(
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status429TooManyRequests)]
     public async Task<ActionResult<MonthlyInvoiceReport>> GetMonthly(
         [FromQuery] string? month,
         [FromHeader(Name = TenantResolver.TenantHeaderName)] string? dealerId,
