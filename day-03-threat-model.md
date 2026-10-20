@@ -22,9 +22,9 @@ only because JwtBearer validates the signature, issuer and audience.
 | **S**poofing | A `dealer-alpha` user sends `X-Dealer-Id: dealer-bravo`. | The policy compares the header to the signed `tenant_id` claim. Standard users can omit the header entirely. Test `A_CrossTenantRequest_ByStandardUser_Returns403_...`. | Low |
 | **S**poofing (admin) | Role or admin flag sent in a header or query string. | Role read only from the principal. Test `AdminBypass_CannotBeClaimedThroughQueryStringOrRequestHeaders`. | Low |
 | **T**ampering | Crafted header (SQL meta-characters, Unicode look-alikes, trailing newline). | Strict ASCII regex, parameterized EF Core query, `\z` anchor and explicit `A-Z` in the claim regex. | Low |
-| **R**epudiation | A user denies reading or probing another tenant. | Successful reads write an `AuditLog` row. Every denied decision logs a `TenantAccessDenied` warning (event 4030) with subject, requested tenant and reason. | Low. Logs need retention and an alert rule outside this repo. |
+| **R**epudiation | A user denies reading or probing another tenant. | Successful reads write an `AuditLog` row. Every denied decision logs a `TenantAccessDenied` warning (event 4030) with subject, requested tenant and reason. `TenantDenialMonitor` logs one `TenantAccessProbeSuspected` error (event 4031) when one subject is denied 5 times in 5 minutes. | Low. Log retention and routing event 4031 to a pager are operations tasks outside this repo. Counts are per instance. |
 | **I**nformation disclosure | Enumerate tenant keys via 404 vs 403. | Authorization runs before the existence check, so a non-admin gets 403 for an unknown tenant. | Low |
-| **D**enial of service | Mass key guessing, each guess a DB lookup. | `PerCaller` fixed-window limit (60/min per subject, per IP when anonymous) on all controllers. Returns 429 with `Retry-After`. | Medium-low. Behind a proxy, configure `ForwardedHeaders` or all anonymous callers share one IP. The limit is per instance, not distributed. |
+| **D**enial of service | Mass key guessing, each guess a DB lookup. | `PerCaller` fixed-window limit (60/min per subject, per IP when anonymous) on all controllers. Returns 429 with `Retry-After`. `UseForwardedHeaders` honors `X-Forwarded-For` only from loopback and `ForwardedHeaders:KnownProxies`, so callers cannot spoof a new IP per request. | Low. The proxy addresses must be listed when deploying behind a proxy. The middleware skips the proxy check when the connection has no remote IP (Unix socket or named pipe), so only expose such a listener to the local proxy. The limit is per instance, not distributed. |
 | **E**levation of privilege | Several `tenant_id` claims, or a blank claim. | Ambiguous or malformed claims are denied (fail closed). | Low. `PlatformAdmin` is a full bypass by design, so its issuance must be controlled at the identity provider. |
 
 ## Structural risk and guard
@@ -49,10 +49,15 @@ reads. Reviewers must still check those by hand.
 | `tests/.../TestAuthHandler.cs` | `X-Test-Tenant` header becomes a claim | None | Flagged. Test-only. It must never be registered in the API. |
 | Branch `phase-1/repository-setup` (PR #1) | `X-Dealer-Id` header | None (seeded flaw) | Flagged. Never merge it without Phase 2. |
 
-## Still open
+## Deployment hardening
 
-- Configure the production JwtBearer `Authority` and `ValidAudiences`. Today
-  `appsettings.json` has none, so token validation fails and the API fails
-  closed with 401.
-- Configure `ForwardedHeaders` before deploying behind a proxy.
-- Add an alert on bursts of `TenantAccessDenied` for one subject.
+Items first listed as open in this review are now enforced in code:
+
+| Item | Control | Test |
+| --- | --- | --- |
+| Production JWT settings | Outside Development, startup fails unless `Authentication:Schemes:Bearer` sets `Authority` (or `MetadataAddress`) and at least one audience. | `StartupConfigurationTests` |
+| Proxy client IP | `UseForwardedHeaders` runs first and trusts only loopback and `ForwardedHeaders:KnownProxies`. An invalid address fails startup. | `RateLimitingTests.SpoofedForwardedFor_...`, `StartupConfigurationTests` |
+| Probe alerting | `TenantDenialMonitor` logs event 4031 at Error level once per window when a subject reaches the denial threshold (`Security:TenantDenialAlert`). | `TenantDenialMonitorTests`, `TenantAccessHandlerTests` |
+
+Still the operator's job: provide the real identity-provider values, list the
+real proxy addresses, and route event 4031 to an alerting channel.

@@ -110,7 +110,10 @@ other than exactly `PlatformAdmin`.
 Every denial is logged as a `TenantAccessDenied` warning (event id 4030) with
 the subject, the requested tenant key and a reason code (`NotAuthenticated`,
 `NoTenantRequested`, `MissingOrInvalidTenantClaim`, `TenantMismatch`). The raw
-claim value is never logged.
+claim value is never logged. When one subject is denied
+`Security:TenantDenialAlert:Threshold` times (default 5) within the window
+(default 5 minutes), `TenantDenialMonitor` logs one `TenantAccessProbeSuspected`
+error (event id 4031). Route that event to your alerting channel.
 
 A standard user may omit `X-Dealer-Id`. The controller then uses the caller's
 own `tenant_id` claim (same validation rules) as the requested key, and the
@@ -141,6 +144,15 @@ Only the identity provider can make someone an administrator.
 | Tenant claim | `tenant_id`, value is a tenant key such as `dealer-alpha` | `Security/TenantClaimTypes.cs` |
 | Administrator role | `PlatformAdmin`, in the standard role claim | `Security/AppRoles.cs` |
 | Subject | `sub` claim (mapped to `ClaimTypes.NameIdentifier`), stored in the audit log | — |
+
+Outside Development the API refuses to start unless
+`Authentication:Schemes:Bearer` sets `Authority` (or `MetadataAddress`) and at
+least one audience (`Audience`, `ValidAudience` or `ValidAudiences`).
+
+Behind a reverse proxy, list the proxy addresses in
+`ForwardedHeaders:KnownProxies`. `X-Forwarded-For` and `X-Forwarded-Proto` are
+honored only from those addresses and loopback, so callers cannot spoof their
+IP to get around the per-IP rate limit.
 
 Tests replace JWT bearer with `TestAuthHandler`, which builds the identity
 from test-only headers (`X-Test-Subject`, `X-Test-Tenant`, `X-Test-Roles`).

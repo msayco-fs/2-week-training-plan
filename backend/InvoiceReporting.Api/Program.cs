@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Security.Claims;
 using System.Threading.RateLimiting;
 using InvoiceReporting.Api.Data;
@@ -7,6 +8,7 @@ using InvoiceReporting.Api.Security;
 using InvoiceReporting.Api.Tenancy;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -31,6 +33,40 @@ builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer();
 
+// Outside Development, tokens must be validated against a real identity
+// provider. Fail at startup instead of running with no usable token settings.
+if (!builder.Environment.IsDevelopment())
+{
+    builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+        .Validate(
+            options => (!string.IsNullOrWhiteSpace(options.Authority) || !string.IsNullOrWhiteSpace(options.MetadataAddress))
+                && (!string.IsNullOrWhiteSpace(options.Audience)
+                    || !string.IsNullOrWhiteSpace(options.TokenValidationParameters.ValidAudience)
+                    || options.TokenValidationParameters.ValidAudiences?.Any() == true),
+            "Authentication:Schemes:Bearer must set Authority (or MetadataAddress) and at least one audience outside Development.")
+        .ValidateOnStart();
+}
+
+// Only the listed proxies (plus loopback, the framework default) may set the
+// client IP through X-Forwarded-For, so callers cannot spoof their address to
+// get around the per-IP rate limit. Addresses are parsed here so a bad value
+// fails at startup.
+var knownProxies = (builder.Configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? [])
+    .Select(IPAddress.Parse)
+    .ToArray();
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    foreach (var proxy in knownProxies)
+    {
+        options.KnownProxies.Add(proxy);
+    }
+});
+
+builder.Services.AddMemoryCache();
+builder.Services.Configure<TenantDenialAlertOptions>(
+    builder.Configuration.GetSection(TenantDenialAlertOptions.SectionName));
+builder.Services.AddSingleton<TenantDenialMonitor>();
 builder.Services.AddSingleton<IAuthorizationHandler, TenantAccessHandler>();
 builder.Services.AddAuthorizationBuilder()
     .AddPolicy(AuthorizationPolicies.TenantAccess, policy => policy
@@ -68,6 +104,10 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+// First, so every later middleware (HTTPS redirection, rate limiting) sees the
+// real client address and scheme.
+app.UseForwardedHeaders();
 
 if (app.Environment.IsDevelopment())
 {

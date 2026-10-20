@@ -16,9 +16,10 @@ namespace InvoiceReporting.Api.Security;
 /// role and the tenant claim come from the authenticated principal, which the
 /// trusted identity provider issued; nothing here reads request input.
 /// Every denial is logged as a <c>TenantAccessDenied</c> warning so that
-/// cross-tenant probing can be detected.
+/// cross-tenant probing can be detected, and is counted by
+/// <see cref="TenantDenialMonitor"/>, which raises an alert on bursts.
 /// </summary>
-public sealed partial class TenantAccessHandler(ILogger<TenantAccessHandler> logger)
+public sealed partial class TenantAccessHandler(ILogger<TenantAccessHandler> logger, TenantDenialMonitor denialMonitor)
     : AuthorizationHandler<TenantAccessRequirement, TenantScope>
 {
     protected override Task HandleRequirementAsync(
@@ -62,8 +63,12 @@ public sealed partial class TenantAccessHandler(ILogger<TenantAccessHandler> log
 
     // The requested key has already passed the resolver's strict pattern, and the
     // raw claim value is never logged, so log lines cannot be forged.
-    private void LogDenied(ClaimsPrincipal user, TenantScope resource, string reason) =>
-        LogTenantAccessDenied(logger, user.FindFirstValue(ClaimTypes.NameIdentifier), resource.TenantKey, reason);
+    private void LogDenied(ClaimsPrincipal user, TenantScope resource, string reason)
+    {
+        var subject = user.FindFirstValue(ClaimTypes.NameIdentifier);
+        LogTenantAccessDenied(logger, subject, resource.TenantKey, reason);
+        denialMonitor.RecordDenial(subject);
+    }
 
     [LoggerMessage(EventId = 4030, EventName = "TenantAccessDenied", Level = LogLevel.Warning,
         Message = "Tenant access denied for subject {Subject} requesting tenant {RequestedTenant}: {Reason}")]

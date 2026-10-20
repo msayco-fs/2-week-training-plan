@@ -57,8 +57,27 @@ public sealed class TenantAccessHandlerTests
         Assert.Empty(logger.Entries);
     }
 
+    [Fact]
+    public async Task RepeatedDenials_ForOneSubject_RaiseOneProbeAlert()
+    {
+        var monitorLogger = new CapturingLogger<TenantDenialMonitor>();
+        var monitor = TenantDenialMonitorTests.Create(monitorLogger, threshold: 3);
+
+        for (var i = 0; i < 4; i++)
+        {
+            Assert.False(await AuthorizeAsync("dealer-alpha", subject: "prober", monitor: monitor));
+        }
+
+        var alert = Assert.Single(monitorLogger.Entries);
+        Assert.Equal("TenantAccessProbeSuspected", alert.EventId.Name);
+        Assert.Equal("prober", alert.State["Subject"]);
+    }
+
     private static async Task<bool> AuthorizeAsync(
-        string claim, CapturingLogger<TenantAccessHandler>? logger = null, string subject = "test-user")
+        string claim,
+        CapturingLogger<TenantAccessHandler>? logger = null,
+        string subject = "test-user",
+        TenantDenialMonitor? monitor = null)
     {
         var identity = new ClaimsIdentity(
             [new Claim(ClaimTypes.NameIdentifier, subject), new Claim(TenantClaimTypes.TenantId, claim)],
@@ -66,7 +85,10 @@ public sealed class TenantAccessHandlerTests
         var requirement = new TenantAccessRequirement();
         var context = new AuthorizationHandlerContext([requirement], new ClaimsPrincipal(identity), new TenantScope(TenantKey));
 
-        await new TenantAccessHandler(logger ?? new CapturingLogger<TenantAccessHandler>()).HandleAsync(context);
+        var handler = new TenantAccessHandler(
+            logger ?? new CapturingLogger<TenantAccessHandler>(),
+            monitor ?? TenantDenialMonitorTests.Create());
+        await handler.HandleAsync(context);
         return context.HasSucceeded;
     }
 }
