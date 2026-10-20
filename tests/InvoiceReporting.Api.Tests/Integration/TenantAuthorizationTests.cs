@@ -106,7 +106,6 @@ public sealed class TenantAuthorizationTests(InvoiceReportApiFactory factory) : 
         { "empty tenant_id claim", "" },
         { "whitespace tenant_id claim", " " },
         { "claim for a tenant that does not exist", "dealer-unknown" },
-        { "claim differs only by case", "DEALER-ALPHA" },
         { "two tenant_id claims, one matching", $"{TestData.TenantAKey},{TestData.TenantBKey}" },
     };
 
@@ -162,6 +161,44 @@ public sealed class TenantAuthorizationTests(InvoiceReportApiFactory factory) : 
         var response = await _client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await AssertReportNotExecutedAsync(subject);
+    }
+
+    // ---- Test F: tenant claim casing from the identity provider is normalized
+
+    [Theory]
+    [InlineData("DEALER-ALPHA")]
+    [InlineData("Dealer-Alpha")]
+    [InlineData("dEaLeR-aLpHa")]
+    public async Task F_SameTenantRequest_WithMixedCaseTenantClaim_Returns200_WithOnlyThatTenantsInvoices(string tenantClaim)
+    {
+        var request = HttpRequestBuilder.MonthlyReport(
+            TestData.ReportMonth, TestData.TenantAKey, HttpRequestBuilder.NewSubject(), tenantClaim);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var report = await response.Content.ReadFromJsonAsync<MonthlyInvoiceReport>();
+        Assert.NotNull(report);
+        Assert.Equal(TestData.TenantASeptemberTotal, report.Total);
+        Assert.Equal(3, report.Invoices.Count);
+        Assert.All(report.Invoices, i => Assert.StartsWith("A-", i.CustomerName));
+    }
+
+    [Theory]
+    [InlineData("DEALER-ALPHA")]
+    [InlineData("Dealer-Alpha")]
+    public async Task F_CrossTenantRequest_WithMixedCaseTenantClaim_Returns403_AndDoesNotRunReport(string tenantClaim)
+    {
+        // Normalizing the claim must not widen access: a tenant A claim in any
+        // casing is still not tenant B.
+        var subject = HttpRequestBuilder.NewSubject();
+        var request = HttpRequestBuilder.MonthlyReport(TestData.ReportMonth, TestData.TenantBKey, subject, tenantClaim);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await AssertNoReportDataAsync(response);
         await AssertReportNotExecutedAsync(subject);
     }
 

@@ -89,12 +89,17 @@ the request only when:
 1. The caller is authenticated, **and**
 2. Either:
    - the caller has the role claim `PlatformAdmin` (administrator bypass), or
-   - the caller has **exactly one** `tenant_id` claim, it is non-empty, and it
-     equals the resolved tenant key using an ordinal, case-sensitive comparison.
+   - the caller has **exactly one** `tenant_id` claim. After trimming, the
+     claim must match `^[A-Za-z0-9][A-Za-z0-9-]{0,31}$`, and its lower-case
+     form must equal the resolved tenant key.
+
+The pattern is checked before lowercasing. `ToLowerInvariant` maps some
+non-ASCII characters to ASCII (for example the Kelvin sign U+212A becomes
+`k`), so checking first stops such a claim from matching a real tenant key.
 
 Everything else is denied: no claim, an empty claim, two or more claims, a
-claim in a different case, a different tenant, or a role other than exactly
-`PlatformAdmin`.
+claim with non-ASCII or other invalid characters, a different tenant, or a role
+other than exactly `PlatformAdmin`.
 
 | Situation | Response |
 | --- | --- |
@@ -104,8 +109,9 @@ claim in a different case, a different tenant, or a role other than exactly
 | Authorized, tenant does not exist (admin, or user whose own tenant is gone) | `404` |
 | Authorized | `200` with the report |
 
-**Claim requirements.** The identity provider must issue `tenant_id` as the
-lower-case tenant key, for example `dealer-alpha`. Administrators get the
+**Claim requirements.** The identity provider issues `tenant_id` as the tenant
+key, for example `dealer-alpha`. Case does not matter (`Dealer-Alpha` is
+accepted), but only ASCII letters, digits and `-` are. Administrators get the
 `PlatformAdmin` role in the token's role claim. The JWT bearer handler maps the
 `role` claim to `ClaimTypes.Role`. The application has no endpoint that sets
 roles or claims, and it never reads roles from headers or the query string.
