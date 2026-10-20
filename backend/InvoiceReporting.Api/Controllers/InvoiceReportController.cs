@@ -17,7 +17,10 @@ public sealed class InvoiceReportController(
 {
     /// <summary>Returns the invoices issued in <paramref name="month"/> for the requested tenant.</summary>
     /// <param name="month">Reporting month in <c>yyyy-MM</c> form.</param>
-    /// <param name="dealerId">Key of the tenant whose report is requested.</param>
+    /// <param name="dealerId">
+    /// Key of the tenant whose report is requested. Required for a PlatformAdmin.
+    /// Optional for other callers, who default to the tenant in their tenant_id claim.
+    /// </param>
     /// <param name="cancellationToken">Request cancellation.</param>
     [HttpGet("monthly")]
     [ProducesResponseType<MonthlyInvoiceReport>(StatusCodes.Status200OK)]
@@ -38,7 +41,19 @@ public sealed class InvoiceReportController(
                 detail: $"Use the {ReportingMonth.Format} format.");
         }
 
-        var resolution = await tenantResolver.ResolveAsync(dealerId, cancellationToken);
+        // Standard users can only ever act on their own tenant, so when they omit
+        // the header the key comes from their signed tenant_id claim instead of
+        // client input. A header that is sent is still checked by the TenantAccess
+        // policy below, so a mismatch is still 403.
+        var requestedKey = dealerId;
+        if (string.IsNullOrWhiteSpace(requestedKey)
+            && !User.IsInRole(AppRoles.PlatformAdmin)
+            && TenantClaims.TryGetTenantKey(User, out var callerTenantKey))
+        {
+            requestedKey = callerTenantKey;
+        }
+
+        var resolution = await tenantResolver.ResolveAsync(requestedKey, cancellationToken);
         if (resolution.TenantKey is null)
         {
             return Problem(

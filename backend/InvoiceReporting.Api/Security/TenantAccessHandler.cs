@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 
 namespace InvoiceReporting.Api.Security;
@@ -15,16 +15,26 @@ namespace InvoiceReporting.Api.Security;
 /// Every other case is left unsatisfied, so the policy fails closed. Both the
 /// role and the tenant claim come from the authenticated principal, which the
 /// trusted identity provider issued; nothing here reads request input.
+/// Every denial is logged as a <c>TenantAccessDenied</c> warning so that
+/// cross-tenant probing can be detected.
 /// </summary>
-public sealed partial class TenantAccessHandler : AuthorizationHandler<TenantAccessRequirement, TenantScope>
+public sealed partial class TenantAccessHandler(ILogger<TenantAccessHandler> logger)
+    : AuthorizationHandler<TenantAccessRequirement, TenantScope>
 {
     protected override Task HandleRequirementAsync(
         AuthorizationHandlerContext context,
         TenantAccessRequirement requirement,
         TenantScope resource)
     {
-        if (context.User.Identity?.IsAuthenticated != true || string.IsNullOrEmpty(resource.TenantKey))
+        if (context.User.Identity?.IsAuthenticated != true)
         {
+            LogDenied(context.User, resource, "NotAuthenticated");
+            return Task.CompletedTask;
+        }
+
+        if (string.IsNullOrEmpty(resource.TenantKey))
+        {
+            LogDenied(context.User, resource, "NoTenantRequested");
             return Task.CompletedTask;
         }
 
@@ -34,22 +44,28 @@ public sealed partial class TenantAccessHandler : AuthorizationHandler<TenantAcc
             return Task.CompletedTask;
         }
 
-        // More than one tenant claim is ambiguous, so it is denied rather than
-        // matched against any one of them.
-        var tenantClaims = context.User.FindAll(TenantClaimTypes.TenantId).Take(2).ToList();
-        var tenantClaimsValue = tenantClaims.Count == 1 ? tenantClaims[0].Value.Trim() : null;
-        if (tenantClaims.Count == 1
-            && TenantClaimPattern().IsMatch(tenantClaimsValue)
-            && !string.IsNullOrEmpty(tenantClaimsValue)
-            && string.Equals(tenantClaimsValue.ToLowerInvariant(), resource.TenantKey, StringComparison.Ordinal))
+        if (!TenantClaims.TryGetTenantKey(context.User, out var callerTenantKey))
         {
-            context.Succeed(requirement);
+            LogDenied(context.User, resource, "MissingOrInvalidTenantClaim");
+            return Task.CompletedTask;
         }
 
+        if (!string.Equals(callerTenantKey, resource.TenantKey, StringComparison.Ordinal))
+        {
+            LogDenied(context.User, resource, "TenantMismatch");
+            return Task.CompletedTask;
+        }
+
+        context.Succeed(requirement);
         return Task.CompletedTask;
     }
-    // Explicit A-Z, not RegexOptions.IgnoreCase: under the invariant culture
-    // IgnoreCase also matches U+212A for 'k'. \z, not $, so a trailing "\n" fails.
-    [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9-]{0,31}\z", RegexOptions.CultureInvariant)]
-    private static partial Regex TenantClaimPattern();
+
+    // The requested key has already passed the resolver's strict pattern, and the
+    // raw claim value is never logged, so log lines cannot be forged.
+    private void LogDenied(ClaimsPrincipal user, TenantScope resource, string reason) =>
+        LogTenantAccessDenied(logger, user.FindFirstValue(ClaimTypes.NameIdentifier), resource.TenantKey, reason);
+
+    [LoggerMessage(EventId = 4030, EventName = "TenantAccessDenied", Level = LogLevel.Warning,
+        Message = "Tenant access denied for subject {Subject} requesting tenant {RequestedTenant}: {Reason}")]
+    private static partial void LogTenantAccessDenied(ILogger logger, string? subject, string? requestedTenant, string reason);
 }

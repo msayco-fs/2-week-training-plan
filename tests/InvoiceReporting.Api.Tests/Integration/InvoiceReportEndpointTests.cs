@@ -93,18 +93,27 @@ public sealed class InvoiceReportEndpointTests(InvoiceReportApiFactory factory) 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
-    [Theory]
-    [InlineData(null)]
-    [InlineData("not a valid key!")]
-    public async Task MissingOrMalformedTenantHeader_Returns400_AndWritesNoAuditLog(string? dealerId)
+    [Fact]
+    public async Task MalformedTenantHeader_Returns400_AndWritesNoAuditLog()
     {
         var subject = HttpRequestBuilder.NewSubject();
-        var request = HttpRequestBuilder.MonthlyReport(TestData.ReportMonth, dealerId, subject, TestData.TenantAKey);
+        var request = HttpRequestBuilder.MonthlyReport(TestData.ReportMonth, "not a valid key!", subject, TestData.TenantAKey);
 
         var response = await _client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal(0, await factory.WithDbAsync(db => db.AuditLogs.CountAsync(a => a.ActorSubject == subject)));
+    }
+
+    [Fact]
+    public async Task MissingTenantHeader_FromAdministrator_Returns400()
+    {
+        var request = HttpRequestBuilder.MonthlyReport(
+            TestData.ReportMonth, dealerId: null, HttpRequestBuilder.NewSubject(), tenantClaim: null, AppRoles.PlatformAdmin);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]
