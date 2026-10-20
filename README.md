@@ -15,6 +15,7 @@ authorization flaw on purpose. Phase 2 fixes it.
 | --- | --- | --- |
 | 1 | Set up the repository and CI. Seed an endpoint that resolves the tenant from a request header but does not check that the caller belongs to that tenant. | Done |
 | 2 | Add a tenant-scoped authorization policy with a `PlatformAdmin` bypass, and prove it with `WebApplicationFactory` integration tests. | Done |
+| 3 | Write a STRIDE-lite threat model of the header tenant pattern and sweep the repository for the same flaw. Harden with denial logging, rate limiting and a claim-derived tenant. See [day-03-threat-model.md](day-03-threat-model.md). | Done |
 
 ## Repository layout
 
@@ -24,7 +25,8 @@ backend/InvoiceReporting.Api/     ASP.NET Core Web API (controllers)
   Data/                           ReportingDbContext, migrations, development seed data
   Domain/                         Tenant, Invoice, AuditLog entities
   Reporting/                      Report service, month parsing, response records
-  Security/                       TenantAccess policy, requirement, handler; claim and role constants
+  Security/                       TenantAccess policy, requirement, handler; claim parsing; rate-limit policy;
+                                  claim and role constants
   Tenancy/                        Tenant resolution (header -> validated tenant)
 tests/InvoiceReporting.Api.Tests/ xUnit unit and WebApplicationFactory integration tests
 frontend/                         Angular application (standard starter)
@@ -33,6 +35,7 @@ docs/                             Training note and repository-settings guide
 InvoiceReporting.slnx             .NET solution
 global.json                       Pins the .NET SDK
 dotnet-tools.json                 Local tool manifest (dotnet-ef)
+day-03-threat-model.md            STRIDE-lite threat model and repository sweep
 ```
 
 ## Versions
@@ -53,12 +56,15 @@ dotnet-tools.json                 Local tool manifest (dotnet-ef)
 
 ```text
 HTTP request
-  -> Authentication (JWT bearer)          401 when no valid identity
-  -> [Authorize] on controller
+  -> Authentication (JWT bearer)
+  -> Rate limiter (PerCaller)             429 when over the per-caller limit
+  -> [Authorize] on controller            401 when no valid identity
   -> InvoiceReportController
        -> ReportingMonth.TryParse          400 when month is not yyyy-MM
-       -> ITenantResolver (X-Dealer-Id)    400 when missing or malformed
-       -> IAuthorizationService            403 when the TenantAccess policy fails
+       -> tenant key: X-Dealer-Id, or the tenant_id claim when a
+          standard user omits the header
+       -> ITenantResolver                  400 when missing or malformed
+       -> IAuthorizationService            403 when the TenantAccess policy fails (logged)
             (TenantAccess, TenantScope)
        -> tenant exists?                   404 when unknown (only reachable once authorized)
        -> IInvoiceReportService            one query + audit log row
@@ -101,10 +107,20 @@ Everything else is denied: no claim, an empty claim, two or more claims, a
 claim with non-ASCII or other invalid characters, a different tenant, or a role
 other than exactly `PlatformAdmin`.
 
+Every denial is logged as a `TenantAccessDenied` warning (event id 4030) with
+the subject, the requested tenant key and a reason code (`NotAuthenticated`,
+`NoTenantRequested`, `MissingOrInvalidTenantClaim`, `TenantMismatch`). The raw
+claim value is never logged.
+
+A standard user may omit `X-Dealer-Id`. The controller then uses the caller's
+own `tenant_id` claim (same validation rules) as the requested key, and the
+policy still runs. A `PlatformAdmin` must always send the header.
+
 | Situation | Response |
 | --- | --- |
 | No or invalid token | `401` |
-| Bad `month`, or missing or malformed `X-Dealer-Id` | `400` ProblemDetails |
+| Over the per-caller rate limit | `429` with `Retry-After` |
+| Bad `month`; malformed `X-Dealer-Id`; or `X-Dealer-Id` missing and no usable `tenant_id` claim (or caller is an admin) | `400` ProblemDetails |
 | Authenticated, policy denied (includes unknown tenant for non-admins) | `403`, empty body; report not run, no audit row |
 | Authorized, tenant does not exist (admin, or user whose own tenant is gone) | `404` |
 | Authorized | `200` with the report |
@@ -178,7 +194,7 @@ curl -H "Authorization: Bearer <token>" -H "X-Dealer-Id: dealer-alpha" \
 | Input | Where | Rules |
 | --- | --- | --- |
 | `month` | query | Required. `yyyy-MM`. |
-| `X-Dealer-Id` | header | Required. Tenant key, `^[a-z0-9][a-z0-9-]{0,31}$` after trim and lower-casing. |
+| `X-Dealer-Id` | header | Required for `PlatformAdmin`; optional for other callers, who default to their `tenant_id` claim. Tenant key, `^[a-z0-9][a-z0-9-]{0,31}$` after trim and lower-casing. |
 | `Authorization` | header | Required. `Bearer <JWT>`. |
 
 `200 OK`:
@@ -195,7 +211,9 @@ curl -H "Authorization: Bearer <token>" -H "X-Dealer-Id: dealer-alpha" \
 
 Errors: `400` (bad month or tenant header, as ProblemDetails), `401` (not
 authenticated), `403` (not allowed to access that tenant, empty body), `404`
-(unknown tenant, only after authorization succeeds).
+(unknown tenant, only after authorization succeeds), `429` (rate limit
+exceeded; `RateLimiting:PerCaller` defaults to 60 requests per minute per
+subject).
 
 ## Run the frontend
 
@@ -237,7 +255,9 @@ dotnet test InvoiceReporting.slnx --filter "FullyQualifiedName~TenantAuthorizati
 | B | Tenant A user requests Tenant A | `200`, only Tenant A invoices, correct total |
 | C | `PlatformAdmin` (with no tenant claim, or with Tenant A's) requests Tenant B | `200`, Tenant B report, audited against Tenant B |
 | D | No identity | `401`, no data |
-| E | Missing, empty, unknown, wrong-case or duplicate `tenant_id` claim; unknown tenant; missing or malformed header | `403` or `400`, no data |
+| E | Missing, empty, unknown, wrong-case or duplicate `tenant_id` claim; unknown tenant; malformed header; missing header with no usable claim | `403` or `400`, no data |
+| F | Mixed-case `tenant_id` claim, same tenant and cross-tenant | `200` and `403` |
+| G | Standard user omits the header | `200` for their own tenant from the claim; `404` if that tenant does not exist |
 | Extra | Admin flag sent in the query string or headers; roles `platformadmin`, `Admin`, `TenantAdmin` | `403` |
 
 ### Test database
