@@ -40,6 +40,7 @@ public sealed class TenantResolverTests(InvoiceReportApiFactory factory) : IClas
         var result = await ResolveAsync("dealer-unknown");
 
         Assert.Equal(TenantResolutionStatus.NotFound, result.Status);
+        Assert.Equal("dealer-unknown", result.TenantKey);
         Assert.Null(result.Tenant);
     }
 

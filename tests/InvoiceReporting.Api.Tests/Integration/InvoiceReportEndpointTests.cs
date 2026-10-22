@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using InvoiceReporting.Api.Domain;
 using InvoiceReporting.Api.Reporting;
+using InvoiceReporting.Api.Security;
 using InvoiceReporting.Api.Tests.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 
@@ -107,35 +108,13 @@ public sealed class InvoiceReportEndpointTests(InvoiceReportApiFactory factory) 
     }
 
     [Fact]
-    public async Task UnknownTenant_Returns404()
+    public async Task UnknownTenant_RequestedByAdministrator_Returns404()
     {
         var request = HttpRequestBuilder.MonthlyReport(
-            TestData.ReportMonth, "dealer-unknown", HttpRequestBuilder.NewSubject(), TestData.TenantAKey);
+            TestData.ReportMonth, "dealer-unknown", HttpRequestBuilder.NewSubject(), tenantClaim: null, AppRoles.PlatformAdmin);
 
         var response = await _client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-    }
-
-    /// <summary>
-    /// CHARACTERIZATION OF THE INTENTIONAL PHASE 1 VULNERABILITY.
-    /// A Tenant A user reads Tenant B's invoices by changing the X-Dealer-Id header.
-    /// This test asserts the insecure behaviour so the weakness is visible and
-    /// reproducible. Phase 2 must replace it with a test that expects 403 Forbidden.
-    /// </summary>
-    [Fact]
-    [Trait("Category", "KnownVulnerability")]
-    public async Task KnownVulnerability_CrossTenantRequest_CurrentlyReturnsOtherTenantsInvoices()
-    {
-        var request = HttpRequestBuilder.MonthlyReport(
-            TestData.ReportMonth, TestData.TenantBKey, HttpRequestBuilder.NewSubject(), tenantClaim: TestData.TenantAKey);
-
-        var response = await _client.SendAsync(request);
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var report = await response.Content.ReadFromJsonAsync<MonthlyInvoiceReport>();
-        Assert.NotNull(report);
-        Assert.Equal(TestData.TenantBSeptemberTotal, report.Total);
-        Assert.All(report.Invoices, i => Assert.StartsWith("B-", i.CustomerName));
     }
 }
