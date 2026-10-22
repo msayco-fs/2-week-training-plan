@@ -15,7 +15,8 @@ namespace InvoiceReporting.Api.Tests.Infrastructure;
 /// Hosts the real application pipeline with two substitutions:
 /// <list type="bullet">
 /// <item>SQL Server is replaced by a private SQLite in-memory database, created and seeded per factory instance.</item>
-/// <item>JWT bearer is replaced by <see cref="TestAuthHandler"/> as the default scheme.</item>
+/// <item>JWT bearer is replaced by <see cref="TestAuthHandler"/> as the default scheme.
+/// Placeholder JWT bearer settings are supplied only to pass the startup check.</item>
 /// </list>
 /// SQLite is relational (foreign keys, unique indexes, real SQL translation) but does
 /// not validate SQL Server-specific behaviour such as collation or decimal precision.
@@ -27,6 +28,12 @@ public sealed class InvoiceReportApiFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
+
+        // Satisfies the startup check on JWT bearer settings outside Development.
+        // JWT bearer never runs in tests (TestAuthHandler is the default scheme),
+        // so this authority is never contacted.
+        builder.UseSetting("Authentication:Schemes:Bearer:Authority", "https://identity.test.invalid/");
+        builder.UseSetting("Authentication:Schemes:Bearer:ValidAudiences:0", "invoice-reporting-tests");
 
         builder.ConfigureTestServices(services =>
         {

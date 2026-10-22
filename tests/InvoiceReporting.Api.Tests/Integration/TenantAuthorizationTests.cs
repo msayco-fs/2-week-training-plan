@@ -136,13 +136,27 @@ public sealed class TenantAuthorizationTests(InvoiceReportApiFactory factory) : 
         await AssertNoReportDataAsync(response);
     }
 
-    [Theory]
-    [InlineData(null)]
-    [InlineData("not a valid key!")]
-    public async Task E_MissingOrMalformedTenantHeader_Returns400_WithNoInvoiceData(string? dealerId)
+    [Fact]
+    public async Task E_MalformedTenantHeader_Returns400_WithNoInvoiceData()
     {
         var subject = HttpRequestBuilder.NewSubject();
-        var request = HttpRequestBuilder.MonthlyReport(TestData.ReportMonth, dealerId, subject, TestData.TenantAKey);
+        var request = HttpRequestBuilder.MonthlyReport(TestData.ReportMonth, "not a valid key!", subject, TestData.TenantAKey);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        await AssertNoReportDataAsync(response);
+        await AssertReportNotExecutedAsync(subject);
+    }
+
+    [Theory]
+    [InlineData(null)]                                            // no tenant_id claim
+    [InlineData(" ")]                                             // blank claim
+    [InlineData($"{TestData.TenantAKey},{TestData.TenantBKey}")]  // ambiguous claims
+    public async Task E_MissingTenantHeader_WithNoUsableTenantClaim_Returns400_WithNoInvoiceData(string? tenantClaim)
+    {
+        var subject = HttpRequestBuilder.NewSubject();
+        var request = HttpRequestBuilder.MonthlyReport(TestData.ReportMonth, dealerId: null, subject, tenantClaim);
 
         var response = await _client.SendAsync(request);
 
@@ -200,6 +214,43 @@ public sealed class TenantAuthorizationTests(InvoiceReportApiFactory factory) : 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         await AssertNoReportDataAsync(response);
         await AssertReportNotExecutedAsync(subject);
+    }
+
+    // ---- Test G: standard users without the header get their own tenant from the claim
+
+    [Theory]
+    [InlineData(TestData.TenantAKey)]
+    [InlineData("DEALER-ALPHA")]
+    public async Task G_StandardUser_WithoutHeader_GetsOwnTenantsReport_AuditedAgainstOwnTenant(string tenantClaim)
+    {
+        var subject = HttpRequestBuilder.NewSubject();
+        var request = HttpRequestBuilder.MonthlyReport(TestData.ReportMonth, dealerId: null, subject, tenantClaim);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var report = await response.Content.ReadFromJsonAsync<MonthlyInvoiceReport>();
+        Assert.NotNull(report);
+        Assert.Equal(TestData.TenantASeptemberTotal, report.Total);
+        Assert.Equal(3, report.Invoices.Count);
+        Assert.All(report.Invoices, i => Assert.StartsWith("A-", i.CustomerName));
+        var auditedTenant = await factory.WithDbAsync(db => db.AuditLogs
+            .Where(a => a.ActorSubject == subject)
+            .Select(a => a.Tenant.Key)
+            .SingleAsync());
+        Assert.Equal(TestData.TenantAKey, auditedTenant);
+    }
+
+    [Fact]
+    public async Task G_StandardUser_WithoutHeader_WhoseClaimedTenantDoesNotExist_Returns404()
+    {
+        // The caller learns only that its own tenant is missing, which is not enumeration.
+        var request = HttpRequestBuilder.MonthlyReport(
+            TestData.ReportMonth, dealerId: null, HttpRequestBuilder.NewSubject(), "dealer-unknown");
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     // ---- Administrator bypass cannot be self-assigned
