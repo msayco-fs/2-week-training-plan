@@ -33,6 +33,6 @@ public sealed class TenantInputInventoryTests
     }
 
     private static bool AcceptsTenantIdentifier(ParameterInfo parameter) =>
-        parameter.GetCustomAttribute<FromHeaderAttribute>()?.Name == TenantResolver.TenantHeaderName
+        parameter.GetCustomAttribute<FromHeaderAttribute>()?.Name?.Equals(TenantResolver.TenantHeaderName, StringComparison.OrdinalIgnoreCase) == true
         || TenantParameterNames.Contains(parameter.Name?.ToLowerInvariant());
 }
