@@ -9,6 +9,10 @@ namespace InvoiceReporting.Api.Security;
 /// <c>TenantAccessProbeSuspected</c> error per window, which monitoring can
 /// route to an alert.
 /// </summary>
+/// <remarks>
+/// Counts live in this process only. With several instances, alert on the
+/// <c>TenantAccessDenied</c> events (4030) aggregated in the log platform.
+/// </remarks>
 public sealed partial class TenantDenialMonitor(
     IMemoryCache cache,
     IOptions<TenantDenialAlertOptions> options,

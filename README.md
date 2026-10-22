@@ -115,6 +115,14 @@ claim value is never logged. When one subject is denied
 (default 5 minutes), `TenantDenialMonitor` logs one `TenantAccessProbeSuspected`
 error (event id 4031). Route that event to your alerting channel.
 
+The monitor counts in memory, per process. When you run more than one instance
+behind a load balancer, one subject's denials are split across instances and
+event 4031 may never fire. In that deployment, build the alert in your log
+platform from event 4030 instead: count `TenantAccessDenied` events grouped by
+`Subject` over the same window, and alert when a count reaches the threshold.
+For example: "event id 4030, grouped by Subject, count >= 5 in 5 minutes".
+Keep event 4031 as a backup signal.
+
 A standard user may omit `X-Dealer-Id`. The controller then uses the caller's
 own `tenant_id` claim (same validation rules) as the requested key, and the
 policy still runs. A `PlatformAdmin` must always send the header.
