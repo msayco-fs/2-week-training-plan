@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Hosting;
+using InvoiceReporting.Api.Tests.Infrastructure;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Options;
 
 namespace InvoiceReporting.Api.Tests.Integration;
@@ -11,7 +13,9 @@ public sealed class StartupConfigurationTests
     public void OutsideDevelopment_WithoutJwtAuthorityAndAudience_FailsAtStartup()
     {
         using var factory = new WebApplicationFactory<Program>()
-            .WithWebHostBuilder(builder => builder.UseEnvironment("Production"));
+            .WithWebHostBuilder(builder => builder
+                .UseEnvironment("Production")
+                .ConfigureTestServices(services => services.UseInMemoryHangfire()));
 
         var exception = Record.Exception(() => factory.CreateClient());
 
@@ -28,7 +32,8 @@ public sealed class StartupConfigurationTests
                 .UseEnvironment("Production")
                 .UseSetting("Authentication:Schemes:Bearer:Authority", "https://identity.test.invalid/")
                 .UseSetting("Authentication:Schemes:Bearer:ValidAudiences:0", "invoice-reporting-tests")
-                .UseSetting("ForwardedHeaders:KnownProxies:0", "not-an-ip"));
+                .UseSetting("ForwardedHeaders:KnownProxies:0", "not-an-ip")
+                .ConfigureTestServices(services => services.UseInMemoryHangfire()));
 
         var exception = Record.Exception(() => factory.CreateClient());
 

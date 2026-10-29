@@ -15,6 +15,7 @@ namespace InvoiceReporting.Api.Tests.Infrastructure;
 /// Hosts the real application pipeline with two substitutions:
 /// <list type="bullet">
 /// <item>SQL Server is replaced by a private SQLite in-memory database, created and seeded per factory instance.</item>
+/// <item>Hangfire's SQL Server storage is replaced by in-memory storage.</item>
 /// <item>JWT bearer is replaced by <see cref="TestAuthHandler"/> as the default scheme.
 /// Placeholder JWT bearer settings are supplied only to pass the startup check.</item>
 /// </list>
@@ -40,6 +41,7 @@ public sealed class InvoiceReportApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<DbContextOptions<ReportingDbContext>>();
             services.RemoveAll<IDbContextOptionsConfiguration<ReportingDbContext>>();
             services.AddDbContext<ReportingDbContext>(options => options.UseSqlite(_connection));
+            services.UseInMemoryHangfire();
 
             services
                 .AddAuthentication(TestAuthHandler.SchemeName)
