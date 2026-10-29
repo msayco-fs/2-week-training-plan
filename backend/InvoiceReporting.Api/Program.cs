@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Security.Claims;
 using System.Threading.RateLimiting;
+using Hangfire;
 using InvoiceReporting.Api.Data;
 using InvoiceReporting.Api.Reporting;
 using InvoiceReporting.Api.Security;
@@ -21,6 +22,12 @@ builder.Services.AddOpenApi();
 
 builder.Services.AddDbContext<ReportingDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("Reporting")));
+
+builder.Services.AddHangfire(configuration => configuration
+    .UseSimpleAssemblyNameTypeSerializer()
+    .UseRecommendedSerializerSettings()
+    .UseSqlServerStorage(builder.Configuration.GetConnectionString("Hangfire")));
+builder.Services.AddHangfireServer();
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ITenantResolver, TenantResolver>();
@@ -126,6 +133,8 @@ app.UseAuthentication();
 // authorization so anonymous floods are throttled too.
 app.UseRateLimiter();
 app.UseAuthorization();
+
+app.UseHangfireDashboard();
 
 // Applied to every controller, so new endpoints are limited by default.
 app.MapControllers().RequireRateLimiting(RateLimitPolicies.PerCaller);
