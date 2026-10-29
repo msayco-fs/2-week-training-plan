@@ -28,6 +28,11 @@ builder.Services.AddHangfire(configuration => configuration
     .UseRecommendedSerializerSettings()
     .UseSqlServerStorage(builder.Configuration.GetConnectionString("Hangfire")));
 builder.Services.AddHangfireServer();
+builder.Services.AddScoped<QuarterlyReportScheduler>();
+builder.Services.AddScoped<QuarterlyReportJob>();
+builder.Services.Configure<QuarterlyReportOutputOptions>(
+    builder.Configuration.GetSection(QuarterlyReportOutputOptions.SectionName));
+builder.Services.AddSingleton<QuarterlyReportCsvWriter>();
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ITenantResolver, TenantResolver>();
@@ -111,6 +116,14 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+var recurring = app.Services.GetRequiredService<IRecurringJobManager>();
+
+recurring.AddOrUpdate<QuarterlyReportScheduler>(
+    QuarterlyReportScheduler.RecurringJobId,
+    job => job.QueueAllTenantsAsync(CancellationToken.None),
+    QuarterlyReportScheduler.CronExpression,
+    new RecurringJobOptions { TimeZone = TimeZoneInfo.Utc });
 
 // First, so every later middleware (HTTPS redirection, rate limiting) sees the
 // real client address and scheme.
