@@ -1,3 +1,4 @@
+using InvoiceReporting.Api.Data.Repositories;
 using InvoiceReporting.Api.Reporting;
 using InvoiceReporting.Api.Tests.Infrastructure;
 using Microsoft.EntityFrameworkCore;
@@ -44,7 +45,10 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         var writer = new QuarterlyReportCsvWriter(
             Options.Create(new QuarterlyReportOutputOptions { Directory = _outputDirectory }),
             factory.Services.GetRequiredService<IHostEnvironment>());
-        return new QuarterlyReportJob(db, TimeProvider.System, writer, NullLogger<QuarterlyReportJob>.Instance);
+        return new QuarterlyReportJob(
+            new InvoiceRepository(db),
+            new AuditLogRepository(db),
+            TimeProvider.System, writer, NullLogger<QuarterlyReportJob>.Instance);
     }
 
     public void Dispose()
