@@ -4,6 +4,7 @@ using System.Security.Claims;
 using System.Threading.RateLimiting;
 using Hangfire;
 using InvoiceReporting.Api.Data;
+using InvoiceReporting.Api.Data.Repositories;
 using InvoiceReporting.Api.Reporting;
 using InvoiceReporting.Api.Security;
 using InvoiceReporting.Api.Tenancy;
@@ -37,6 +38,9 @@ builder.Services.AddSingleton<QuarterlyReportCsvWriter>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ITenantResolver, TenantResolver>();
 builder.Services.AddScoped<IInvoiceReportService, InvoiceReportService>();
+builder.Services.AddScoped<ITenantRepository, TenantRepository>();
+builder.Services.AddScoped<IInvoiceRepository, InvoiceRepository>();
+builder.Services.AddScoped<IAuditLogRepository, AuditLogRepository>();
 
 // JWT bearer settings (authority, issuer, audiences) are bound from the
 // "Authentication:Schemes:Bearer" configuration section. Local development

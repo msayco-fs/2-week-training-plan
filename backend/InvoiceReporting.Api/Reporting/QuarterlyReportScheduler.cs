@@ -1,6 +1,5 @@
 using Hangfire;
-using InvoiceReporting.Api.Data;
-using Microsoft.EntityFrameworkCore;
+using InvoiceReporting.Api.Data.Repositories;
 
 namespace InvoiceReporting.Api.Reporting;
 
@@ -10,7 +9,7 @@ namespace InvoiceReporting.Api.Reporting;
 /// so a failure for one tenant does not block the others.
 /// </summary>
 public sealed class QuarterlyReportScheduler(
-    ReportingDbContext db,
+    ITenantRepository tenants,
     IBackgroundJobClient jobs,
     TimeProvider timeProvider)
 {
@@ -27,10 +26,7 @@ public sealed class QuarterlyReportScheduler(
         var today = DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime);
         var quarter = ReportingQuarter.Containing(today).Previous;
 
-        var tenantIds = await db.Tenants
-            .AsNoTracking()
-            .Select(t => t.Id)
-            .ToListAsync(cancellationToken);
+        var tenantIds = await tenants.GetAllIdsAsync(cancellationToken);
 
         // The quarter is fixed here and passed as arguments, so a retry days
         // later still reports on the same quarter.

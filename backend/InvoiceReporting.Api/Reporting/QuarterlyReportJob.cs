@@ -1,7 +1,6 @@
 using Hangfire;
-using InvoiceReporting.Api.Data;
+using InvoiceReporting.Api.Data.Repositories;
 using InvoiceReporting.Api.Domain;
-using Microsoft.EntityFrameworkCore;
 
 namespace InvoiceReporting.Api.Reporting;
 
@@ -11,7 +10,8 @@ namespace InvoiceReporting.Api.Reporting;
 /// Queued by <see cref="QuarterlyReportScheduler"/>.
 /// </summary>
 public sealed class QuarterlyReportJob(
-    ReportingDbContext db,
+    IInvoiceRepository invoiceRepository,
+    IAuditLogRepository auditLogs,
     TimeProvider timeProvider,
     QuarterlyReportCsvWriter csvWriter,
     ILogger<QuarterlyReportJob> logger)
@@ -23,26 +23,16 @@ public sealed class QuarterlyReportJob(
         var detail = quarter.ToString();
 
         // Retries and manual re-runs must not report the same quarter twice.
-        var alreadyGenerated = await db.AuditLogs.AnyAsync(
-            a => a.TenantId == tenantId
-                && a.Action == AuditActions.GenerateQuarterlyInvoiceReport
-                && a.Detail == detail,
-            cancellationToken);
+        var alreadyGenerated = await auditLogs.ExistsAsync(
+            tenantId, AuditActions.GenerateQuarterlyInvoiceReport, detail, cancellationToken);
         if (alreadyGenerated)
         {
             logger.LogInformation("Quarterly report {Quarter} for tenant {TenantId} already generated", detail, tenantId);
             return;
         }
 
-        var invoices = await db.Invoices
-            .AsNoTracking()
-            .Where(i => i.TenantId == tenantId
-                && i.IssuedDate >= quarter.FirstDay
-                && i.IssuedDate < quarter.FirstDayOfNextQuarter)
-            .OrderBy(i => i.IssuedDate)
-            .ThenBy(i => i.Id)
-            .Select(i => new InvoiceSummary(i.Id, i.CustomerName, i.Amount, i.IssuedDate))
-            .ToListAsync(cancellationToken);
+        var invoices = await invoiceRepository.GetSummariesAsync(
+            tenantId, quarter.FirstDay, quarter.FirstDayOfNextQuarter, cancellationToken);
 
         // Summed in memory, like the monthly report: SQLite (used in tests)
         // cannot aggregate decimal columns.
@@ -53,15 +43,14 @@ public sealed class QuarterlyReportJob(
         // writes the file again instead of skipping it.
         var path = await csvWriter.WriteAsync(tenantId, quarter, invoices, total, cancellationToken);
 
-        db.AuditLogs.Add(new AuditLog
+        await auditLogs.AddAsync(new AuditLog
         {
             TenantId = tenantId,
             Action = AuditActions.GenerateQuarterlyInvoiceReport,
             Detail = detail,
             ActorSubject = null, // System job, no caller.
             OccurredAtUtc = timeProvider.GetUtcNow(),
-        });
-        await db.SaveChangesAsync(cancellationToken);
+        }, cancellationToken);
 
         logger.LogInformation(
             "Generated quarterly report {Quarter} for tenant {TenantId}: {Count} invoices, total {Total}, saved to {Path}",
