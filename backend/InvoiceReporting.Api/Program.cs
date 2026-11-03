@@ -34,6 +34,20 @@ builder.Services.AddScoped<QuarterlyReportJob>();
 builder.Services.Configure<QuarterlyReportOutputOptions>(
     builder.Configuration.GetSection(QuarterlyReportOutputOptions.SectionName));
 builder.Services.AddSingleton<QuarterlyReportCsvWriter>();
+builder.Services.AddScoped<QuarterlyReportEmailJob>();
+builder.Services.AddSingleton<IReportEmailSender, SmtpReportEmailSender>();
+
+// When email is turned on, fail at startup on missing SMTP settings instead
+// of failing later inside a background job.
+builder.Services.AddOptions<QuarterlyReportEmailOptions>()
+    .Bind(builder.Configuration.GetSection(QuarterlyReportEmailOptions.SectionName))
+    .Validate(
+        options => !options.Enabled
+            || (!string.IsNullOrWhiteSpace(options.Host)
+                && options.Port is > 0 and <= 65535
+                && !string.IsNullOrWhiteSpace(options.FromAddress)),
+        "Reporting:Email must set Host, Port and FromAddress when Enabled is true.")
+    .ValidateOnStart();
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ITenantResolver, TenantResolver>();
@@ -41,6 +55,8 @@ builder.Services.AddScoped<IInvoiceReportService, InvoiceReportService>();
 builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<IInvoiceRepository, InvoiceRepository>();
 builder.Services.AddScoped<IAuditLogRepository, AuditLogRepository>();
+builder.Services.AddScoped<IReportRecipientRepository, ReportRecipientRepository>();
+builder.Services.AddScoped<IEmailDeliveryRepository, EmailDeliveryRepository>();
 
 // JWT bearer settings (authority, issuer, audiences) are bound from the
 // "Authentication:Schemes:Bearer" configuration section. Local development

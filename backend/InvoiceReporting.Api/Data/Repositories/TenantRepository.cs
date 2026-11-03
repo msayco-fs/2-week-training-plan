@@ -17,4 +17,11 @@ public sealed class TenantRepository(ReportingDbContext db) : ITenantRepository
             .AsNoTracking()
             .Select(t => t.Id)
             .ToListAsync(cancellationToken);
+
+    public Task<string?> GetDisplayNameAsync(int tenantId, CancellationToken cancellationToken) =>
+        db.Tenants
+            .AsNoTracking()
+            .Where(t => t.Id == tenantId)
+            .Select(t => t.DisplayName)
+            .SingleOrDefaultAsync(cancellationToken);
 }

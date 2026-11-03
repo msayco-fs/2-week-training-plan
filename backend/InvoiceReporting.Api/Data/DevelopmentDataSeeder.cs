@@ -4,12 +4,50 @@ using Microsoft.EntityFrameworkCore;
 namespace InvoiceReporting.Api.Data;
 
 /// <summary>
-/// Inserts fictitious tenants and invoices into an empty local development
-/// database. Only called from the Development environment.
+/// Inserts fictitious tenants, invoices and report recipients into an empty
+/// local development database. Only called from the Development environment.
 /// </summary>
 public static class DevelopmentDataSeeder
 {
     public static async Task SeedAsync(ReportingDbContext db, CancellationToken cancellationToken = default)
+    {
+        await SeedTenantsAsync(db, cancellationToken);
+
+        // Separate check, so databases created before users existed get them too.
+        await SeedUsersAsync(db, cancellationToken);
+    }
+
+    private static async Task SeedUsersAsync(ReportingDbContext db, CancellationToken cancellationToken)
+    {
+        if (await db.Users.AnyAsync(cancellationToken))
+        {
+            return;
+        }
+
+        var alpha = await db.Tenants.SingleAsync(t => t.Key == "dealer-alpha", cancellationToken);
+        var bravo = await db.Tenants.SingleAsync(t => t.Key == "dealer-bravo", cancellationToken);
+
+        var admin = new User { Subject = "dev-admin", Email = "admin@example.com", IsPlatformAdmin = true };
+        admin.TenantAssignments.Add(new UserTenantAssignment { Tenant = alpha });
+
+        var users = new (User User, bool WillReceiveReport)[]
+        {
+            (new User { Subject = "dev-alpha-user", Email = "alpha.user@example.com", Tenant = alpha }, true),
+            (new User { Subject = "dev-alpha-optout", Email = "alpha.optout@example.com", Tenant = alpha }, false),
+            (new User { Subject = "dev-bravo-user", Email = "bravo.user@example.com", Tenant = bravo }, true),
+            (admin, true),
+        };
+
+        foreach (var (user, willReceiveReport) in users)
+        {
+            user.QuarterlyReportRecipient = new QuarterlyReportRecipient { WillReceiveReport = willReceiveReport };
+            db.Users.Add(user);
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private static async Task SeedTenantsAsync(ReportingDbContext db, CancellationToken cancellationToken)
     {
         if (await db.Tenants.AnyAsync(cancellationToken))
         {

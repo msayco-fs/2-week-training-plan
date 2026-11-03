@@ -235,6 +235,41 @@ authenticated), `403` (not allowed to access that tenant, empty body), `404`
 exceeded; `RateLimiting:PerCaller` defaults to 60 requests per minute per
 subject).
 
+### Quarterly report emails (Mailpit)
+
+After `QuarterlyReportJob` writes a tenant's CSV, `QuarterlyReportEmailJob`
+emails it to each opted-in recipient (`QuarterlyReportRecipients.WillReceiveReport`):
+
+- A standard user receives the report for their own tenant (`Users.TenantId`).
+- A `PlatformAdmin` user receives one email per tenant listed for them in
+  `UserTenantAssignments`. These assignments affect email only, not API access.
+
+Development sends through a local [Mailpit](https://mailpit.axllent.org/)
+server on `localhost:1025`. Mailpit catches every message and delivers nothing.
+Start it with Docker, or download the single binary from the Mailpit releases page:
+
+```bash
+docker run -d --name mailpit -p 8025:8025 -p 1025:1025 axllent/mailpit
+```
+
+Open the inbox at <http://localhost:8025>. Trigger `quarterly-invoice-report`
+from the Hangfire dashboard (`/hangfire`) to send the seeded reports.
+
+SMTP settings live under `Reporting:Email`. Email is off by default outside
+Development (`Enabled: false`). To use a real provider (Mailjet is the
+planned production choice), change only the settings, and keep the
+credentials in user secrets or environment variables:
+
+```bash
+Reporting__Email__Enabled=true
+Reporting__Email__Host=in-v3.mailjet.com
+Reporting__Email__Port=587
+Reporting__Email__Security=StartTls
+Reporting__Email__Username=<Mailjet API key>
+Reporting__Email__Password=<Mailjet secret key>
+Reporting__Email__FromAddress=<address on a verified domain>
+```
+
 ## Run the frontend
 
 ```bash

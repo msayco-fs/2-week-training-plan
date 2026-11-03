@@ -15,6 +15,11 @@ public sealed class QuarterlyReportCsvWriter(
     public string OutputDirectory =>
         Path.GetFullPath(Path.Combine(environment.ContentRootPath, options.Value.Directory));
 
+    /// <summary>Full path of one tenant's report file for a quarter, whether or not it exists yet.</summary>
+    public string GetPath(int tenantId, ReportingQuarter quarter) =>
+        // Tenant id, not tenant key, so the file name never contains stored text.
+        Path.Combine(OutputDirectory, string.Create(CultureInfo.InvariantCulture, $"{quarter}-tenant-{tenantId}.csv"));
+
     /// <summary>Writes the file and returns its full path. An existing file for the same quarter is replaced.</summary>
     public async Task<string> WriteAsync(
         int tenantId,
@@ -24,10 +29,7 @@ public sealed class QuarterlyReportCsvWriter(
         CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(OutputDirectory);
-
-        // Tenant id, not tenant key, so the file name never contains stored text.
-        var fileName = string.Create(CultureInfo.InvariantCulture, $"{quarter}-tenant-{tenantId}.csv");
-        var path = Path.Combine(OutputDirectory, fileName);
+        var path = GetPath(tenantId, quarter);
 
         var csv = new StringBuilder();
         csv.AppendLine("InvoiceId,CustomerName,IssuedDate,Amount");

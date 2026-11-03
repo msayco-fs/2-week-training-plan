@@ -13,6 +13,14 @@ public sealed class ReportingDbContext(DbContextOptions<ReportingDbContext> opti
 
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
 
+    public DbSet<User> Users => Set<User>();
+
+    public DbSet<UserTenantAssignment> UserTenantAssignments => Set<UserTenantAssignment>();
+
+    public DbSet<QuarterlyReportRecipient> QuarterlyReportRecipients => Set<QuarterlyReportRecipient>();
+
+    public DbSet<QuarterlyReportEmailDelivery> QuarterlyReportEmailDeliveries => Set<QuarterlyReportEmailDelivery>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Tenant>(tenant =>
@@ -44,6 +52,62 @@ public sealed class ReportingDbContext(DbContextOptions<ReportingDbContext> opti
                 .WithMany()
                 .HasForeignKey(a => a.TenantId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<User>(user =>
+        {
+            user.Property(u => u.Subject).HasMaxLength(128);
+            user.HasIndex(u => u.Subject).IsUnique();
+            user.Property(u => u.Email).HasMaxLength(254);
+            user.HasOne(u => u.Tenant)
+                .WithMany()
+                .HasForeignKey(u => u.TenantId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // A standard user always belongs to exactly one tenant.
+            user.ToTable(t => t.HasCheckConstraint(
+                "CK_Users_TenantRequiredForStandardUsers",
+                "IsPlatformAdmin = 1 OR TenantId IS NOT NULL"));
+        });
+
+        modelBuilder.Entity<UserTenantAssignment>(assignment =>
+        {
+            assignment.HasKey(a => new { a.UserId, a.TenantId });
+            assignment.HasOne(a => a.User)
+                .WithMany(u => u.TenantAssignments)
+                .HasForeignKey(a => a.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+            assignment.HasOne(a => a.Tenant)
+                .WithMany()
+                .HasForeignKey(a => a.TenantId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<QuarterlyReportRecipient>(recipient =>
+        {
+            recipient.HasKey(r => r.UserId);
+            recipient.HasOne(r => r.User)
+                .WithOne(u => u.QuarterlyReportRecipient)
+                .HasForeignKey<QuarterlyReportRecipient>(r => r.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<QuarterlyReportEmailDelivery>(delivery =>
+        {
+            delivery.Property(d => d.Quarter).HasMaxLength(16);
+            delivery.Property(d => d.Status).HasConversion<string>().HasMaxLength(16);
+
+            // The idempotency key: at most one email per tenant, user and quarter.
+            delivery.HasIndex(d => new { d.TenantId, d.UserId, d.Quarter }).IsUnique();
+
+            delivery.HasOne(d => d.Tenant)
+                .WithMany()
+                .HasForeignKey(d => d.TenantId)
+                .OnDelete(DeleteBehavior.Restrict);
+            delivery.HasOne(d => d.User)
+                .WithMany()
+                .HasForeignKey(d => d.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }

@@ -6,7 +6,8 @@ namespace InvoiceReporting.Api.Reporting;
 
 /// <summary>
 /// Builds the quarterly invoice report for one tenant, saves it as a CSV file
-/// (see <see cref="QuarterlyReportCsvWriter"/>) and records an audit entry.
+/// (see <see cref="QuarterlyReportCsvWriter"/>), records an audit entry and
+/// queues the report emails (see <see cref="QuarterlyReportEmailJob"/>).
 /// Queued by <see cref="QuarterlyReportScheduler"/>.
 /// </summary>
 public sealed class QuarterlyReportJob(
@@ -14,6 +15,7 @@ public sealed class QuarterlyReportJob(
     IAuditLogRepository auditLogs,
     TimeProvider timeProvider,
     QuarterlyReportCsvWriter csvWriter,
+    IBackgroundJobClient jobs,
     ILogger<QuarterlyReportJob> logger)
 {
     [AutomaticRetry(Attempts = 3)]
@@ -28,6 +30,11 @@ public sealed class QuarterlyReportJob(
         if (alreadyGenerated)
         {
             logger.LogInformation("Quarterly report {Quarter} for tenant {TenantId} already generated", detail, tenantId);
+
+            // Queued again in case the earlier run saved the audit entry but
+            // failed before queuing the emails. Safe: each recipient's email
+            // job skips people who already received the report.
+            QueueEmails(tenantId, year, quarterNumber);
             return;
         }
 
@@ -55,5 +62,11 @@ public sealed class QuarterlyReportJob(
         logger.LogInformation(
             "Generated quarterly report {Quarter} for tenant {TenantId}: {Count} invoices, total {Total}, saved to {Path}",
             detail, tenantId, count, total, path);
+
+        QueueEmails(tenantId, year, quarterNumber);
     }
+
+    private void QueueEmails(int tenantId, int year, int quarterNumber) =>
+        jobs.Enqueue<QuarterlyReportEmailJob>(job =>
+            job.QueueRecipientsAsync(tenantId, year, quarterNumber, CancellationToken.None));
 }
