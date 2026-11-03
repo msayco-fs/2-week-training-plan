@@ -46,6 +46,13 @@ public sealed class SmtpReportEmailSender(IOptions<QuarterlyReportEmailOptions> 
         }
     }
 
+    /// <summary>
+    /// SMTP has no way to look up sent emails. Resends rely on the stable
+    /// Message-ID instead, which some mail systems use to drop duplicates.
+    /// </summary>
+    public Task<PriorSendStatus> FindPriorSendAsync(string idempotencyKey, CancellationToken cancellationToken) =>
+        Task.FromResult(PriorSendStatus.Unsupported);
+
     private static SecureSocketOptions ToSocketOptions(SmtpSecurity security) => security switch
     {
         SmtpSecurity.None => SecureSocketOptions.None,
