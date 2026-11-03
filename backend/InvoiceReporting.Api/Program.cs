@@ -145,7 +145,11 @@ app.UseAuthentication();
 app.UseRateLimiter();
 app.UseAuthorization();
 
-app.UseHangfireDashboard();
+// Outside Development, Hangfire's default applies: requests from this machine
+// only. Development also allows requests through Docker's port mapping.
+app.UseHangfireDashboard(options: app.Environment.IsDevelopment()
+    ? new DashboardOptions { Authorization = [new DevelopmentDashboardAuthorizationFilter()] }
+    : new DashboardOptions());
 
 // Applied to every controller, so new endpoints are limited by default.
 app.MapControllers().RequireRateLimiting(RateLimitPolicies.PerCaller);
