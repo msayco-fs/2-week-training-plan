@@ -63,7 +63,7 @@ public sealed class QuarterlyReportEmailConcurrencyTests : IDisposable
         {
             start.SignalAndWait(); // Release all jobs together.
             await using var db = new ReportingDbContext(_dbOptions);
-            await CreateJob(db).SendAsync(tenantId, userId, 2026, 3, CancellationToken.None);
+            await CreateJob(db).SendAsync(tenantId, userId, 2026, 3, null, CancellationToken.None);
         }));
 
         var outcomes = await Task.WhenAll(jobs.Select(CaptureAsync));
@@ -82,7 +82,7 @@ public sealed class QuarterlyReportEmailConcurrencyTests : IDisposable
         // A Hangfire retry of a loser now finds the email sent and does nothing.
         await using (var retryDb = new ReportingDbContext(_dbOptions))
         {
-            await CreateJob(retryDb).SendAsync(tenantId, userId, 2026, 3, CancellationToken.None);
+            await CreateJob(retryDb).SendAsync(tenantId, userId, 2026, 3, null, CancellationToken.None);
         }
 
         Assert.Single(_sender.Sent);
@@ -106,8 +106,10 @@ public sealed class QuarterlyReportEmailConcurrencyTests : IDisposable
             new ReportRecipientRepository(db),
             new TenantRepository(db),
             new EmailDeliveryRepository(db),
+            new AuditLogRepository(db),
             _sender,
             CreateCsvWriter(),
+            new FailedReportEmailLog(NullLoggerFactory.Instance),
             new FakeBackgroundJobClient(),
             Options.Create(new QuarterlyReportEmailOptions { Enabled = true }),
             TimeProvider.System,
