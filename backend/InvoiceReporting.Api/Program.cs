@@ -32,6 +32,7 @@ builder.Services.AddHangfireServer();
 
 // Quarterly report jobs, email sending and their settings (see QuarterlyReportingSetup).
 builder.Services.AddQuarterlyReporting(builder.Configuration);
+builder.AddFailedReportEmailLogFile();
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ITenantResolver, TenantResolver>();
@@ -120,6 +121,7 @@ builder.Services.AddRateLimiter(options =>
 var app = builder.Build();
 
 app.ScheduleQuarterlyReports();
+app.CheckFailedReportEmailLogFolder();
 
 // First, so every later middleware (HTTPS redirection, rate limiting) sees the
 // real client address and scheme.

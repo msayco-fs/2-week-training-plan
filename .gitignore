@@ -522,3 +522,6 @@ TODO-later.md
 
 # generated quarterly report CSV files
 backend/InvoiceReporting.Api/reports/
+
+# failed report email log files (support reads these on the server)
+backend/InvoiceReporting.Api/logs/

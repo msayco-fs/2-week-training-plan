@@ -31,6 +31,50 @@ public static class QuarterlyReportingSetup
         return services;
     }
 
+    /// <summary>
+    /// Adds the daily failed-email log file (<see cref="FailedReportEmailLogFile"/>)
+    /// as an extra logging provider. Runs before the app is built, so it reads
+    /// the settings straight from configuration.
+    /// </summary>
+    public static WebApplicationBuilder AddFailedReportEmailLogFile(this WebApplicationBuilder builder)
+    {
+        var email = builder.Configuration.GetSection(QuarterlyReportEmailOptions.SectionName).Get<QuarterlyReportEmailOptions>()
+            ?? new QuarterlyReportEmailOptions();
+
+        // Bad values are reported by the options validation at startup; don't
+        // fail here first with a less clear Serilog error.
+        if (string.IsNullOrWhiteSpace(email.FailedLogDirectory) || email.FailedLogRetentionDays <= 0)
+        {
+            return builder;
+        }
+
+        builder.Logging.AddFailedReportEmailLogFile(
+            FailedReportEmailLogFile.ResolveDirectory(builder.Environment.ContentRootPath, email.FailedLogDirectory),
+            email.FailedLogRetentionDays);
+        return builder;
+    }
+
+    /// <summary>
+    /// Creates the failed-email log folder and logs a clear error naming the
+    /// path when it can't be written. Does not stop the app: the audit log
+    /// still records failures.
+    /// </summary>
+    public static WebApplication CheckFailedReportEmailLogFolder(this WebApplication app)
+    {
+        var email = app.Services.GetRequiredService<IOptions<QuarterlyReportEmailOptions>>().Value;
+        var directory = FailedReportEmailLogFile.ResolveDirectory(app.Environment.ContentRootPath, email.FailedLogDirectory);
+
+        var error = FailedReportEmailLogFile.CheckDirectory(directory);
+        if (error is not null)
+        {
+            app.Services.GetRequiredService<ILoggerFactory>()
+                .CreateLogger(typeof(QuarterlyReportingSetup))
+                .LogError(error, "Failed report emails can't be written to {Directory}; check the folder or volume permissions", directory);
+        }
+
+        return app;
+    }
+
     /// <summary>Adds or updates the Hangfire recurring job that queues every tenant's quarterly report.</summary>
     public static WebApplication ScheduleQuarterlyReports(this WebApplication app)
     {

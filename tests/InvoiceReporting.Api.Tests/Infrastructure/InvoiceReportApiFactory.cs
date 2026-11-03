@@ -36,6 +36,11 @@ public sealed class InvoiceReportApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("Authentication:Schemes:Bearer:Authority", "https://identity.test.invalid/");
         builder.UseSetting("Authentication:Schemes:Bearer:ValidAudiences:0", "invoice-reporting-tests");
 
+        // Keeps the failed-email log folder out of the backend project folder.
+        builder.UseSetting(
+            "Reporting:Email:FailedLogDirectory",
+            Path.Combine(Path.GetTempPath(), "invoice-reporting-tests", "logs"));
+
         builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<DbContextOptions<ReportingDbContext>>();
