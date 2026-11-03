@@ -17,6 +17,30 @@ public static class TestData
     /// <summary>Tenant B, September 2026: 1000.00 + 2000.00.</summary>
     public const decimal TenantBSeptemberTotal = 3000.00m;
 
+    // Report recipients. Subjects are unique, so tests look users up by subject.
+
+    /// <summary>Standard user of tenant A, opted in.</summary>
+    public const string AlphaUserSubject = "alpha-user";
+
+    /// <summary>Standard user of tenant A, opted out.</summary>
+    public const string AlphaOptOutSubject = "alpha-optout";
+
+    /// <summary>Standard user of tenant B, opted in.</summary>
+    public const string BravoUserSubject = "bravo-user";
+
+    /// <summary>
+    /// Standard user of tenant B, opted in, with a stray assignment row for
+    /// tenant A. Assignments only count for administrators, so this user must
+    /// never receive tenant A's report.
+    /// </summary>
+    public const string BravoUserWithStrayAssignmentSubject = "bravo-stray";
+
+    /// <summary>Platform administrator assigned to tenant A only, opted in.</summary>
+    public const string AdminAssignedToASubject = "admin-a";
+
+    /// <summary>Platform administrator with no assigned tenants, opted in.</summary>
+    public const string AdminWithoutAssignmentsSubject = "admin-none";
+
     public static void Seed(ReportingDbContext db)
     {
         var tenantA = new Tenant { Key = TenantAKey, DisplayName = "Tenant A (test)" };
@@ -33,6 +57,29 @@ public static class TestData
         tenantB.Invoices.Add(new Invoice { CustomerName = "B-Customer-2", Amount = 2000.00m, IssuedDate = new DateOnly(2026, 9, 20) });
 
         db.Tenants.AddRange(tenantA, tenantB);
+
+        var bravoStray = new User { Subject = BravoUserWithStrayAssignmentSubject, Email = "bravo.stray@example.com", Tenant = tenantB };
+        bravoStray.TenantAssignments.Add(new UserTenantAssignment { Tenant = tenantA });
+
+        var adminA = new User { Subject = AdminAssignedToASubject, Email = "admin.a@example.com", IsPlatformAdmin = true };
+        adminA.TenantAssignments.Add(new UserTenantAssignment { Tenant = tenantA });
+
+        var users = new (User User, bool WillReceiveReport)[]
+        {
+            (new User { Subject = AlphaUserSubject, Email = "alpha.user@example.com", Tenant = tenantA }, true),
+            (new User { Subject = AlphaOptOutSubject, Email = "alpha.optout@example.com", Tenant = tenantA }, false),
+            (new User { Subject = BravoUserSubject, Email = "bravo.user@example.com", Tenant = tenantB }, true),
+            (bravoStray, true),
+            (adminA, true),
+            (new User { Subject = AdminWithoutAssignmentsSubject, Email = "admin.none@example.com", IsPlatformAdmin = true }, true),
+        };
+
+        foreach (var (user, willReceiveReport) in users)
+        {
+            user.QuarterlyReportRecipient = new QuarterlyReportRecipient { WillReceiveReport = willReceiveReport };
+            db.Users.Add(user);
+        }
+
         db.SaveChanges();
     }
 }

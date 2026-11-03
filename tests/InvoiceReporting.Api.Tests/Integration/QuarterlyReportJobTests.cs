@@ -40,6 +40,34 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         Assert.Equal("Total,,,1399.99", lines[^1]);
     }
 
+    [Fact]
+    public async Task RunAsync_QueuesTheEmails_BothOnTheFirstRunAndWhenAlreadyGenerated()
+    {
+        var tenantId = await factory.WithDbAsync(db =>
+            db.Tenants.Where(t => t.Key == TestData.TenantBKey).Select(t => t.Id).SingleAsync());
+
+        // The second run finds the audit entry and skips the CSV, but still
+        // queues the emails in case the first run failed before queuing them.
+        for (var run = 0; run < 2; run++)
+        {
+            await factory.WithDbAsync(async db =>
+            {
+                await CreateJob(db).RunAsync(tenantId, 2026, 2, CancellationToken.None);
+                return 0;
+            });
+        }
+
+        Assert.Equal(2, _jobs.Created.Count);
+        Assert.All(_jobs.Created, job =>
+        {
+            Assert.Equal(typeof(QuarterlyReportEmailJob), job.Type);
+            Assert.Equal(nameof(QuarterlyReportEmailJob.QueueRecipientsAsync), job.Method.Name);
+            Assert.Equal(new object[] { tenantId, 2026, 2 }, job.Args.Take(3));
+        });
+    }
+
+    private readonly FakeBackgroundJobClient _jobs = new();
+
     private QuarterlyReportJob CreateJob(Data.ReportingDbContext db)
     {
         var writer = new QuarterlyReportCsvWriter(
@@ -48,7 +76,7 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         return new QuarterlyReportJob(
             new InvoiceRepository(db),
             new AuditLogRepository(db),
-            TimeProvider.System, writer, NullLogger<QuarterlyReportJob>.Instance);
+            TimeProvider.System, writer, _jobs, NullLogger<QuarterlyReportJob>.Instance);
     }
 
     public void Dispose()
