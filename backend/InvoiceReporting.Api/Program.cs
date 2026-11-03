@@ -29,25 +29,9 @@ builder.Services.AddHangfire(configuration => configuration
     .UseRecommendedSerializerSettings()
     .UseSqlServerStorage(builder.Configuration.GetConnectionString("Hangfire")));
 builder.Services.AddHangfireServer();
-builder.Services.AddScoped<QuarterlyReportScheduler>();
-builder.Services.AddScoped<QuarterlyReportJob>();
-builder.Services.Configure<QuarterlyReportOutputOptions>(
-    builder.Configuration.GetSection(QuarterlyReportOutputOptions.SectionName));
-builder.Services.AddSingleton<QuarterlyReportCsvWriter>();
-builder.Services.AddScoped<QuarterlyReportEmailJob>();
-builder.Services.AddSingleton<IReportEmailSender, SmtpReportEmailSender>();
 
-// When email is turned on, fail at startup on missing SMTP settings instead
-// of failing later inside a background job.
-builder.Services.AddOptions<QuarterlyReportEmailOptions>()
-    .Bind(builder.Configuration.GetSection(QuarterlyReportEmailOptions.SectionName))
-    .Validate(
-        options => !options.Enabled
-            || (!string.IsNullOrWhiteSpace(options.Host)
-                && options.Port is > 0 and <= 65535
-                && !string.IsNullOrWhiteSpace(options.FromAddress)),
-        "Reporting:Email must set Host, Port and FromAddress when Enabled is true.")
-    .ValidateOnStart();
+// Quarterly report jobs, email sending and their settings (see QuarterlyReportingSetup).
+builder.Services.AddQuarterlyReporting(builder.Configuration);
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ITenantResolver, TenantResolver>();
@@ -55,8 +39,6 @@ builder.Services.AddScoped<IInvoiceReportService, InvoiceReportService>();
 builder.Services.AddScoped<ITenantRepository, TenantRepository>();
 builder.Services.AddScoped<IInvoiceRepository, InvoiceRepository>();
 builder.Services.AddScoped<IAuditLogRepository, AuditLogRepository>();
-builder.Services.AddScoped<IReportRecipientRepository, ReportRecipientRepository>();
-builder.Services.AddScoped<IEmailDeliveryRepository, EmailDeliveryRepository>();
 
 // JWT bearer settings (authority, issuer, audiences) are bound from the
 // "Authentication:Schemes:Bearer" configuration section. Local development
@@ -137,13 +119,7 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
-var recurring = app.Services.GetRequiredService<IRecurringJobManager>();
-
-recurring.AddOrUpdate<QuarterlyReportScheduler>(
-    QuarterlyReportScheduler.RecurringJobId,
-    job => job.QueueAllTenantsAsync(CancellationToken.None),
-    QuarterlyReportScheduler.CronExpression,
-    new RecurringJobOptions { TimeZone = TimeZoneInfo.Utc });
+app.ScheduleQuarterlyReports();
 
 // First, so every later middleware (HTTPS redirection, rate limiting) sees the
 // real client address and scheme.
