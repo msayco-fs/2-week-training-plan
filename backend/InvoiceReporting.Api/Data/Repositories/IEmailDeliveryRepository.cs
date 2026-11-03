@@ -31,4 +31,13 @@ public enum EmailDeliveryClaimResult
     InProgress,
 }
 
-public sealed record EmailDeliveryClaim(EmailDeliveryClaimResult Result, long DeliveryId = 0, Guid ClaimToken = default);
+/// <param name="TookOverExpiredClaim">
+/// True when this claim replaced an earlier job's expired claim. That job may
+/// have sent the email before it stopped, so the caller should ask the
+/// provider before sending again.
+/// </param>
+public sealed record EmailDeliveryClaim(
+    EmailDeliveryClaimResult Result,
+    long DeliveryId = 0,
+    Guid ClaimToken = default,
+    bool TookOverExpiredClaim = false);

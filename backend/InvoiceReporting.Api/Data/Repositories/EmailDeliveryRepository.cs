@@ -59,7 +59,7 @@ public sealed class EmailDeliveryRepository(ReportingDbContext db) : IEmailDeliv
                 .SetProperty(d => d.ClaimedAtUtc, nowUtc), cancellationToken);
 
         return updated == 1
-            ? new EmailDeliveryClaim(EmailDeliveryClaimResult.Claimed, existing.Id, token)
+            ? new EmailDeliveryClaim(EmailDeliveryClaimResult.Claimed, existing.Id, token, TookOverExpiredClaim: true)
             : new EmailDeliveryClaim(EmailDeliveryClaimResult.InProgress);
     }
 
