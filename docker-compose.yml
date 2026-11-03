@@ -1,0 +1,90 @@
+# Local development only: the API, SQL Server and Mailpit in containers.
+# Production does not use this file (see README, "Deployment").
+#
+#   cp .env.example .env     # then fill in the values
+#   docker compose up --build
+#
+# API:      http://localhost:5080
+# Mailpit:  http://localhost:8025 (every email the API sends lands here)
+
+name: invoice-reporting
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/InvoiceReporting.Api/Dockerfile
+    ports:
+      # 127.0.0.1 only: in Development the Hangfire dashboard is open to any
+      # caller that can reach this port.
+      - "127.0.0.1:5080:8080"
+    environment:
+      # Development applies migrations and seeds the test tenants on startup,
+      # and reads the user-jwts signing key from user secrets.
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Reporting: "Server=sqlserver,1433;Database=InvoiceReportingTraining;User Id=sa;Password=${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD in .env};Encrypt=True;TrustServerCertificate=True"
+      ConnectionStrings__Hangfire: "Server=sqlserver,1433;Database=InvoiceReportingHangfire;User Id=sa;Password=${MSSQL_SA_PASSWORD};Encrypt=True;TrustServerCertificate=True"
+      # The rest of the Mailpit settings come from appsettings.Development.json.
+      Reporting__Email__Host: mailpit
+    volumes:
+      - invoice-reporting-logs:/app/logs
+      - invoice-reporting-reports:/app/reports
+      # Your user secrets, read-only, so `dotnet user-jwts` tokens made on the
+      # host are accepted by the container.
+      - "${USER_SECRETS_DIR:?Set USER_SECRETS_DIR in .env}:/home/app/.microsoft/usersecrets:ro"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      sqlserver-init:
+        condition: service_completed_successfully
+      mailpit:
+        condition: service_started
+
+  sqlserver:
+    # Dev only. Needs about 2 GB of RAM. The image is amd64 only; Apple
+    # silicon runs it under emulation.
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD in .env}
+    ports:
+      # Lets SQL tools on the host connect (localhost,14333). Not needed by the API.
+      - "127.0.0.1:14333:1433"
+    volumes:
+      - invoice-reporting-sql:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -b -Q \"SELECT 1\" -o /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # One-off: creates the Hangfire database, which Hangfire does not create
+  # itself. EF Core migrations create the reporting database.
+  sqlserver-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD in .env}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD" -C -b -Q "IF DB_ID('InvoiceReportingHangfire') IS NULL CREATE DATABASE InvoiceReportingHangfire"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    restart: "no"
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "127.0.0.1:8025:8025" # Web UI
+      - "127.0.0.1:1025:1025" # SMTP, also reachable from a host-run API
+
+# Fixed names, so they match the README and `docker volume` commands.
+volumes:
+  invoice-reporting-logs:
+    name: invoice-reporting-logs
+  invoice-reporting-reports:
+    name: invoice-reporting-reports
+  invoice-reporting-sql:
+    name: invoice-reporting-sql

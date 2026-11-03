@@ -1,0 +1,29 @@
+# The build context is the repo root, but only the API project is needed.
+
+# Build output
+**/bin
+**/obj
+TestResults/
+
+# Not part of the API image
+frontend/
+tests/
+docs/
+graphify-out/
+**/node_modules
+
+# Runtime data: these live in volumes, never in the image
+**/logs
+**/reports
+
+# Secrets and local settings
+.env
+**/*.user
+**/secrets.json
+
+# Tooling and version control
+.git
+.github
+.vs
+.vscode
+.claude
