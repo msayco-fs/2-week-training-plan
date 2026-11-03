@@ -21,10 +21,12 @@ authorization flaw on purpose. Phase 2 fixes it.
 
 ```text
 backend/InvoiceReporting.Api/     ASP.NET Core Web API (controllers)
+  Dockerfile                      Container image (non-root, volumes for logs and reports)
   Controllers/                    InvoiceReportController
   Data/                           ReportingDbContext, migrations, development seed data
   Domain/                         Tenant, Invoice, AuditLog entities
-  Reporting/                      Report service, month parsing, response records
+  Reporting/                      Report service, month parsing, response records; quarterly CSV
+                                  and email jobs, Mailjet and SMTP senders, failed-email log
   Security/                       TenantAccess policy, requirement, handler; claim parsing; rate-limit policy;
                                   claim and role constants
   Tenancy/                        Tenant resolution (header -> validated tenant)
@@ -32,6 +34,7 @@ tests/InvoiceReporting.Api.Tests/ xUnit unit and WebApplicationFactory integrati
 frontend/                         Angular application (standard starter)
 docs/                             Training note and repository-settings guide
 .github/workflows/ci.yml          CI for backend and frontend
+docker-compose.yml, .env.example  Local development stack: API, SQL Server, Mailpit
 InvoiceReporting.slnx             .NET solution
 global.json                       Pins the .NET SDK
 dotnet-tools.json                 Local tool manifest (dotnet-ef)
@@ -172,6 +175,8 @@ Only the test factory registers this handler. The application never does.
 - Node.js 24 and npm 11
 - For running the API locally: SQL Server LocalDB (installed with Visual
   Studio), or another SQL Server instance. Tests do not need SQL Server.
+- Or, instead of LocalDB: Docker with Compose (see
+  [Run with Docker Compose](#run-with-docker-compose)).
 
 ## Run the backend
 
@@ -207,6 +212,50 @@ curl -H "Authorization: Bearer <token>" -H "X-Dealer-Id: dealer-alpha" \
   "http://localhost:5014/api/invoice-reports/monthly?month=2026-09"
 ```
 
+### Run with Docker Compose
+
+Compose runs the API, SQL Server and Mailpit in containers, with no LocalDB
+needed. It is for local development only. SQL Server needs about 2 GB of RAM.
+
+1. Create your token signing key once, on your machine, if you have not
+   already done so: run any `dotnet user-jwts create` command shown above.
+2. Copy the settings file and fill it in. `.env` is git-ignored:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   - `MSSQL_SA_PASSWORD`: any strong password for the local SQL Server.
+   - `USER_SECRETS_DIR`: your user-secrets folder, mounted read-only so the
+     container accepts your `dotnet user-jwts` tokens.
+     Windows: `C:/Users/<you>/AppData/Roaming/Microsoft/UserSecrets`.
+     macOS and Linux: `~/.microsoft/usersecrets`, written as a full path.
+
+3. Start everything:
+
+   ```bash
+   docker compose up --build
+   ```
+
+| Service | Address |
+| --- | --- |
+| API | <http://localhost:5080> |
+| Hangfire dashboard | <http://localhost:5080/hangfire> |
+| Mailpit inbox | <http://localhost:8025> |
+| SQL Server (from host tools) | `localhost,14333`, login `sa` |
+
+All ports are published on `127.0.0.1` only. The API runs in Development, so it
+applies migrations and seeds the test tenants on startup. Data, report CSVs and
+failed-email logs are kept in the named volumes `invoice-reporting-sql`,
+`invoice-reporting-reports` and `invoice-reporting-logs`.
+
+`docker compose down` stops everything and keeps the data. `docker compose down -v`
+also deletes the volumes. Do that after you change `MSSQL_SA_PASSWORD`,
+because SQL Server keeps the password it was first started with.
+
+If every call returns `401`, check `USER_SECRETS_DIR`: the container can't
+see your token signing key.
+
 ### Endpoint contract
 
 `GET /api/invoice-reports/monthly?month=yyyy-MM`
@@ -235,7 +284,7 @@ authenticated), `403` (not allowed to access that tenant, empty body), `404`
 exceeded; `RateLimiting:PerCaller` defaults to 60 requests per minute per
 subject).
 
-### Quarterly report emails (Mailpit)
+### Quarterly report emails
 
 After `QuarterlyReportJob` writes a tenant's CSV, `QuarterlyReportEmailJob`
 emails it to each opted-in recipient (`QuarterlyReportRecipients.WillReceiveReport`):
@@ -244,31 +293,221 @@ emails it to each opted-in recipient (`QuarterlyReportRecipients.WillReceiveRepo
 - A `PlatformAdmin` user receives one email per tenant listed for them in
   `UserTenantAssignments`. These assignments affect email only, not API access.
 
-Development sends through a local [Mailpit](https://mailpit.axllent.org/)
-server on `localhost:1025`. Mailpit catches every message and delivers nothing.
-Start it with Docker, or download the single binary from the Mailpit releases page:
+Each recipient gets a separate Hangfire job, so one bad address does not block
+the others. A recipient never gets the same report twice: each send is claimed
+in `QuarterlyReportEmailDeliveries` first, and a job that takes over an
+interrupted send asks Mailjet whether the email already went out.
+
+Two senders exist. Development uses SMTP to a local Mailpit server, and
+production uses the Mailjet Send API over HTTPS. `Reporting:Email:Provider`
+picks one (`Smtp` or `MailjetApi`).
+
+#### Local development (Mailpit)
+
+[Mailpit](https://mailpit.axllent.org/) catches every message and delivers
+nothing. Docker Compose starts it for you (see
+[Run with Docker Compose](#run-with-docker-compose)). When you run the API with
+`dotnet run`, start Mailpit on its own:
 
 ```bash
-docker run -d --name mailpit -p 8025:8025 -p 1025:1025 axllent/mailpit
+docker run -d --name mailpit -p 127.0.0.1:8025:8025 -p 127.0.0.1:1025:1025 axllent/mailpit
 ```
 
-Open the inbox at <http://localhost:8025>. Trigger `quarterly-invoice-report`
-from the Hangfire dashboard (`/hangfire`) to send the seeded reports.
+To check the emails by hand:
 
-SMTP settings live under `Reporting:Email`. Email is off by default outside
-Development (`Enabled: false`). To use a real provider (Mailjet is the
-planned production choice), change only the settings, and keep the
-credentials in user secrets or environment variables:
+1. Open the Hangfire dashboard: <http://localhost:5080/hangfire> with Compose,
+   or <http://localhost:5014/hangfire> with `dotnet run`.
+2. On **Recurring jobs**, trigger `quarterly-invoice-report`.
+3. Open Mailpit at <http://localhost:8025>. Expect one email per opted-in user
+   of each tenant, with that tenant's CSV attached, and a Message-ID of the form
+   `quarterly-report.<quarter>.t<tenant>.u<user>@...`.
+4. Trigger the job again. No new emails should arrive.
+
+In Development the Hangfire dashboard accepts any caller, so it works through
+Docker's port mapping. Compose publishes the port on `127.0.0.1` only. In
+every other environment the dashboard accepts local requests only.
+
+#### Settings
+
+All settings live under `Reporting:Email`. Email is off by default outside
+Development (`Enabled: false`).
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `Enabled` | `false` | Turns report email on |
+| `Provider` | `Smtp` | `Smtp` (Mailpit, local development) or `MailjetApi` (production) |
+| `FromAddress`, `FromName` | none, `Invoice Reporting` | Sender. The address must be on a verified sending domain |
+| `MaxAttachmentBytes` | `10485760` (10 MB) | Largest CSV that is emailed. Cannot be set above 10 MB |
+| `FailedLogDirectory` | `logs` | Folder for the failed-email log files, relative to the app folder |
+| `FailedLogRetentionDays` | `90` | Days to keep failed-email log files |
+| `Host`, `Port`, `Security`, `Username`, `Password` | | SMTP only |
+| `Mailjet:ApiKey`, `Mailjet:SecretKey` | | Mailjet only. Secrets: never put them in an appsettings file |
+| `Mailjet:BaseUrl` | `https://api.mailjet.com` | Mailjet only. Must be https |
+| `Mailjet:Timeout` | `00:00:30` | Mailjet only |
+| `Mailjet:SandboxMode` | `false` | Mailjet only. Mailjet checks the request and sends nothing |
+
+The app does not start when a required setting for the chosen provider is
+missing or invalid.
+
+#### Production (Mailjet API)
+
+Set these as environment variables (or in your secret store). Never commit the
+keys:
 
 ```bash
 Reporting__Email__Enabled=true
-Reporting__Email__Host=in-v3.mailjet.com
-Reporting__Email__Port=587
-Reporting__Email__Security=StartTls
-Reporting__Email__Username=<Mailjet API key>
-Reporting__Email__Password=<Mailjet secret key>
-Reporting__Email__FromAddress=<address on a verified domain>
+Reporting__Email__Provider=MailjetApi
+Reporting__Email__Mailjet__ApiKey=<Mailjet API key>
+Reporting__Email__Mailjet__SecretKey=<Mailjet secret key>
+Reporting__Email__FromAddress=reports@<your verified domain>
 ```
+
+To try Mailjet from your machine, keep the keys in user secrets instead:
+
+```bash
+dotnet user-secrets set "Reporting:Email:Provider" "MailjetApi" --project backend/InvoiceReporting.Api
+dotnet user-secrets set "Reporting:Email:Mailjet:ApiKey" "<key>" --project backend/InvoiceReporting.Api
+dotnet user-secrets set "Reporting:Email:Mailjet:SecretKey" "<secret>" --project backend/InvoiceReporting.Api
+```
+
+How failures are handled:
+
+| Failure | What the job does |
+| --- | --- |
+| CSV over `MaxAttachmentBytes` | Not sent, not retried. Recorded as failed (`too-large`) |
+| Mailjet rejects the email (4xx other than 408/429) | Not retried. Recorded as failed (`rejected:http-<status>:<Mailjet code>`) |
+| Rate limit (429), timeout status (408), Mailjet error (5xx), no connection | Retried by Hangfire up to 5 times. Each attempt is audited; the last one is recorded as failed (`retries-exhausted:temporary`) |
+| No answer from Mailjet (the email may have gone out) | The claim is kept. After 5 minutes a retry asks Mailjet whether the email was sent, and sends only if it was not |
+| The CSV is missing | Retried, in case the report job is still writing it. The last retry is recorded as failed (`retries-exhausted:csv-missing`) |
+| Another job is still sending the same email | Retried later. The last retry is recorded as failed (`retries-exhausted:in-progress`) |
+
+#### Sending domain: SPF, DKIM and DMARC
+
+Without these records, report emails land in spam or are refused. Do this
+once per sending domain, before go-live:
+
+1. In Mailjet, add and verify the domain under **Account settings > Sender
+   domains & addresses**.
+2. **SPF:** add `include:spf.mailjet.com` to the domain's existing SPF TXT
+   record, for example `v=spf1 include:spf.mailjet.com ~all`. A domain must
+   have only one SPF record, so do not add a second one.
+3. **DKIM:** publish the TXT record `mailjet._domainkey.<domain>` with the
+   public key Mailjet shows.
+4. **DMARC:** start with `_dmarc.<domain>` set to
+   `v=DMARC1; p=none; rua=mailto:<reports address>`. Once the reports show
+   Mailjet mail passing SPF and DKIM, change `p=none` to `p=quarantine`.
+5. Set `FromAddress` to an address on that domain.
+
+#### Test against the Mailjet sandbox
+
+Sandbox mode makes Mailjet check the full request (keys, sender, payload) and
+send nothing:
+
+```bash
+dotnet user-secrets set "Reporting:Email:Mailjet:SandboxMode" "true" --project backend/InvoiceReporting.Api
+```
+
+Run the API with the user-secrets settings above and trigger the job. Each
+send should succeed and nothing should be delivered. Sandbox sends may not be
+stored by Mailjet, so the "already sent" lookup can only be tested with a real
+send to a test inbox.
+
+#### For support: finding failed report emails
+
+Every email that will not be sent without help is written to the audit log
+once:
+
+```sql
+SELECT OccurredAtUtc, TenantId, Detail
+FROM AuditLogs
+WHERE Action = 'EmailQuarterlyInvoiceReportFailed'
+ORDER BY OccurredAtUtc DESC;
+```
+
+`Detail` has the form `<quarter>:user-<id>:<reason>`, for example
+`2026-Q3:user-345:rejected:http-400:mj-0013`. It never contains the email
+address. To find the user, run `SELECT Id, Email FROM Users WHERE Id = 345`.
+
+| Reason | Meaning | What to do |
+| --- | --- | --- |
+| `too-large` | The CSV is over 10 MB, too big to email | Send the report another way |
+| `rejected:...` | Mailjet refused the email: usually a bad address, or a problem with the sending domain | Fix the address or domain, then re-send |
+| `retries-exhausted:temporary` | Mailjet or the network was down for all retries | Re-send |
+| `retries-exhausted:outcome-unknown` or `:lookup-failed` | Mailjet did not answer, so the email may have arrived | Check with the recipient or in the Mailjet message log before re-sending |
+| `retries-exhausted:csv-missing` | The quarterly CSV was never written, or was deleted | Check the `QuarterlyReportJob` run for that tenant in Hangfire, then re-send |
+| `retries-exhausted:in-progress` | Another job kept the email claimed for all retries. That job may still have sent it | Check `QuarterlyReportEmailDeliveries` for the tenant, user and quarter: `Status = 'Sent'` means it went out. If not sent, re-send |
+
+Failed attempts that Hangfire retried are audited separately as
+`EmailQuarterlyInvoiceReportAttemptFailed`. They are for troubleshooting only;
+most are followed by a successful send.
+
+The same failures are also written to a daily log file, which works even when
+the database is down. It is in the `logs` folder of the deployed backend
+(`/app/logs` in the container): `logs/failed-report-emails-YYYYMMDD.log`. Each
+line looks like this:
+
+```text
+2026-11-03T09:15:02.123Z FAILED tenant=12 user=345 quarter=2026-Q3 reason=rejected:http-400:mj-0013 job=8812
+```
+
+Everything is in UTC: the time on each line, the date in the file name (a new
+file starts at 00:00 UTC), and the 90 days the files are kept. `job` is the
+Hangfire job id, which you can open in the dashboard. With more than one server, each server
+writes its own files, so check them all. To find one tenant:
+
+```bash
+grep "tenant=12 " logs/failed-report-emails-*.log
+# Windows PowerShell:
+Select-String "tenant=12 " logs\failed-report-emails-*.log
+```
+
+**Re-sending:** at the start of each quarter, the `quarterly-invoice-report`
+recurring job reports on the quarter that just ended. Trigger it again from the
+Hangfire dashboard to rebuild the CSVs and queue the emails again. Recipients
+who already got their email are skipped. Older quarters are re-run manually
+through the API.
+
+#### Deployment: volumes
+
+The container keeps two kinds of files that must survive restarts and
+deploys. Mount a persistent volume on both:
+
+| Path | Contents |
+| --- | --- |
+| `/app/logs` | Failed-email log files for support |
+| `/app/reports` | Quarterly CSV files, read by the email jobs |
+
+```bash
+docker build -f backend/InvoiceReporting.Api/Dockerfile -t invoice-reporting-api .
+docker run -d --name invoice-reporting-api -p 8080:8080 \
+  -e ASPNETCORE_ENVIRONMENT=Production \
+  -e ConnectionStrings__Reporting="<connection string>" \
+  -e ConnectionStrings__Hangfire="<connection string>" \
+  -e Reporting__Email__Enabled=true \
+  -e Reporting__Email__Provider=MailjetApi \
+  -e Reporting__Email__Mailjet__ApiKey="<key>" \
+  -e Reporting__Email__Mailjet__SecretKey="<secret>" \
+  -e Reporting__Email__FromAddress="reports@<verified domain>" \
+  -v invoice-reporting-logs:/app/logs \
+  -v invoice-reporting-reports:/app/reports \
+  invoice-reporting-api
+```
+
+Production needs the JWT bearer settings as well (see
+[Authentication and claims](#authentication-and-claims)). Production does not
+apply migrations on startup.
+
+- Without the volumes, the files are written inside the container and lost
+  when it is replaced. Nothing warns you, so check the mounts in the deploy
+  configuration.
+- The app runs as the non-root user `app` (UID 1654). A new named volume is
+  writable as it is. A host folder (bind mount) must be owned by UID 1654:
+  `sudo chown -R 1654:1654 /srv/invoice-reporting/logs`.
+- With more than one API container, all of them must share the same
+  `/app/reports` storage. Otherwise an email job can run on a container that
+  does not have the CSV.
+- To check the log volume after a forced failure:
+  `docker exec invoice-reporting-api ls /app/logs`.
 
 ## Run the frontend
 
