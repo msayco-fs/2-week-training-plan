@@ -39,8 +39,13 @@ public sealed class ReportingDbContext(DbContextOptions<ReportingDbContext> opti
                 .HasForeignKey(i => i.TenantId)
                 .OnDelete(DeleteBehavior.Restrict);
 
-            // Supports the tenant + date-range filter used by the monthly report.
-            invoice.HasIndex(i => new { i.TenantId, i.IssuedDate });
+            // Supports the tenant + date-range filter used by the monthly and
+            // quarterly reports. CustomerName and Amount are included so SQL
+            // Server answers the report query from this index alone (an index
+            // seek, already in date order). Without them it scans and sorts the
+            // whole table for every tenant. SQLite ignores the INCLUDE.
+            invoice.HasIndex(i => new { i.TenantId, i.IssuedDate })
+                .IncludeProperties(i => new { i.CustomerName, i.Amount });
         });
 
         modelBuilder.Entity<AuditLog>(audit =>

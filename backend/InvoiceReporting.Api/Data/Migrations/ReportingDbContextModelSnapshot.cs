@@ -83,6 +83,8 @@ namespace InvoiceReporting.Api.Data.Migrations
 
                     b.HasIndex("TenantId", "IssuedDate");
 
+                    SqlServerIndexBuilderExtensions.IncludeProperties(b.HasIndex("TenantId", "IssuedDate"), new[] { "CustomerName", "Amount" });
+
                     b.ToTable("Invoices");
                 });
 

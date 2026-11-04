@@ -15,7 +15,7 @@ Measured on 2026-11-03 against the local Docker SQL Server. Covers the per-tenan
   **214k rows** with typical customer names and **45.8k rows** with 200-character names.
   Batch by CSV size, not run time.
 - **Problem found:** the report query scans the whole `Invoices` table for every
-  tenant. A covering index fixes it (see [Index finding](#index-finding)).
+  tenant. Fixed with a covering index (see [Index finding](#index-finding)).
 
 ## Test setup
 
@@ -100,9 +100,25 @@ Tested with `INCLUDE (CustomerName, Amount)` added to that index:
 Small tenants run about 2x faster. Large tenants barely change, because sending
 the rows takes most of their time. The benefit grows as the table grows.
 
+### Fix applied
+
+Migration `20261104053026_AddInvoiceCoveringIndex` (2026-11-04) adds the
+`INCLUDE (CustomerName, Amount)`. SQL Server cannot add included columns to an
+existing index, so the migration drops and recreates it. On a large production
+table this blocks writes to `Invoices` while it runs, so apply it off-peak.
+
+Checked after the migration, with 1M fictitious rows (4 tenants of 250k) and one
+tenant's Q3 2026 (about 126k rows):
+
+| | Clustered index (forced) | Covering index |
+| --- | --- | --- |
+| Plan | Clustered Index Scan + Sort | Index Seek, ordered, no sort |
+| Logical reads | 10,948 | 1,320 |
+
 ## Open items
 
-1. Add an EF Core migration for the covering index.
+1. ~~Add an EF Core migration for the covering index.~~ Done, see
+   [Fix applied](#fix-applied).
 2. Get the largest tenant-quarter row count from a production read replica,
    with the query below. Tested on dev, its CSV size estimate was within
    0.2 MB of the real files.
