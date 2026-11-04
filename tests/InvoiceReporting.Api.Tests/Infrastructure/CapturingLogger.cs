@@ -11,11 +11,19 @@ public sealed class CapturingLogger<T> : ILogger<T>
 
     public bool IsEnabled(LogLevel logLevel) => true;
 
-    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-        Entries.Add(new LogEntry(
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+    {
+        var entry = new LogEntry(
             logLevel,
             eventId,
-            (state as IEnumerable<KeyValuePair<string, object?>>)?.ToDictionary(p => p.Key, p => p.Value) ?? []));
+            (state as IEnumerable<KeyValuePair<string, object?>>)?.ToDictionary(p => p.Key, p => p.Value) ?? []);
+
+        // Locked because the app can log from concurrent requests.
+        lock (Entries)
+        {
+            Entries.Add(entry);
+        }
+    }
 
     public sealed record LogEntry(LogLevel Level, EventId EventId, IReadOnlyDictionary<string, object?> State);
 }
