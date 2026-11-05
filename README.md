@@ -311,6 +311,16 @@ Errors: `400` (bad year, quarter or tenant header), `401`, `403`, `404`
 request's token reaches every database query and the file write, and no CSV,
 "generated" audit entry or email job is recorded.
 
+**Long runs.** The CSV is built inside the request, so the call takes as long
+as the quarter's query and file write. A reverse proxy or client timeout
+shorter than that (many proxies default to 60 to 120 seconds) closes the
+connection and cancels the run, as above. Nothing is half-recorded: call the
+endpoint again, or let the scheduled job run it. For very large tenants,
+raise the proxy timeout for `/api/admin/quarterly-reports`. For the quarter
+that just ended, the Hangfire dashboard's **Trigger now** is another option:
+it queues every tenant as background jobs, with no request timeout. A queued
+mode for this endpoint that returns `202 Accepted` is not provided.
+
 The Hangfire dashboard's **Trigger now** is a second way to run the job. It
 needs a `PlatformAdmin` caller too (no per-tenant check: the dashboard covers
 every tenant); see the dashboard note under
