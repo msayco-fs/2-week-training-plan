@@ -82,7 +82,7 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
 
         Assert.Equal(QuarterlyReportRunResult.Generated, result);
         Assert.Equal([cts.Token], invoices.Tokens);
-        // ExistsAsync, then AddAsync.
+        // ExistsAsync, then TryAddUniqueAsync.
         Assert.Equal([cts.Token, cts.Token], audits.Tokens);
         Assert.True(File.Exists(CsvPath(tenantId, "2019-Q1")));
         Assert.Single(_jobs.Created);
@@ -121,6 +121,63 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         Assert.Empty(_jobs.Created);
         Assert.False(await GeneratedAuditExistsAsync(tenantId, "2019-Q3"));
     }
+
+    /// <summary>
+    /// Two runs for the same quarter at once (the schedule and an admin
+    /// trigger). The second passes the "already generated" check before the
+    /// first saves. The unique index must stop it recording the quarter twice.
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_WhenAnotherRunSavedTheQuarterAfterTheCheck_ReportsAlreadyGenerated_WithOneAuditEntry()
+    {
+        var tenantId = await TenantAIdAsync();
+        await factory.WithDbAsync(db => CreateJob(db).RunAsync(tenantId, 2019, 4, CancellationToken.None));
+
+        var result = await factory.WithDbAsync(db =>
+            CreateJob(db, audits: new CapturingAuditLogRepository(new AuditLogRepository(db), missFirstCheck: true))
+                .RunAsync(tenantId, 2019, 4, CancellationToken.None));
+
+        Assert.Equal(QuarterlyReportRunResult.AlreadyGenerated, result);
+        var entries = await factory.WithDbAsync(db => db.AuditLogs.CountAsync(a =>
+            a.TenantId == tenantId && a.Action == Domain.AuditActions.GenerateQuarterlyInvoiceReport && a.Detail == "2019-Q4"));
+        Assert.Equal(1, entries);
+        // Both runs still queue the emails; each send job skips people already emailed.
+        Assert.Equal(2, _jobs.Created.Count);
+    }
+
+    [Fact]
+    public async Task TryAddUniqueAsync_AllowsOneGeneratedEntryPerQuarter_ButOtherActionsMayRepeat()
+    {
+        var tenantId = await TenantAIdAsync();
+
+        var (first, second) = await factory.WithDbAsync(async db =>
+        {
+            var repository = new AuditLogRepository(db);
+            return (
+                await repository.TryAddUniqueAsync(Entry(tenantId, Domain.AuditActions.GenerateQuarterlyInvoiceReport, "2018-Q1"), CancellationToken.None),
+                await repository.TryAddUniqueAsync(Entry(tenantId, Domain.AuditActions.GenerateQuarterlyInvoiceReport, "2018-Q1"), CancellationToken.None));
+        });
+
+        Assert.True(first);
+        Assert.False(second);
+
+        // The index is filtered to the "generated" action only.
+        await factory.WithDbAsync(async db =>
+        {
+            var repository = new AuditLogRepository(db);
+            await repository.AddAsync(Entry(tenantId, Domain.AuditActions.ViewMonthlyInvoices, "2018-01"), CancellationToken.None);
+            await repository.AddAsync(Entry(tenantId, Domain.AuditActions.ViewMonthlyInvoices, "2018-01"), CancellationToken.None);
+            return 0;
+        });
+    }
+
+    private static Domain.AuditLog Entry(int tenantId, string action, string detail) => new()
+    {
+        TenantId = tenantId,
+        Action = action,
+        Detail = detail,
+        OccurredAtUtc = DateTimeOffset.UtcNow,
+    };
 
     private readonly FakeBackgroundJobClient _jobs = new();
 
@@ -162,13 +219,26 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         }
     }
 
-    private sealed class CapturingAuditLogRepository(IAuditLogRepository inner) : IAuditLogRepository
+    /// <summary>
+    /// Records the token of each call. With <paramref name="missFirstCheck"/>,
+    /// the first ExistsAsync answers false: like a second run that checked
+    /// just before the first run saved its entry.
+    /// </summary>
+    private sealed class CapturingAuditLogRepository(IAuditLogRepository inner, bool missFirstCheck = false) : IAuditLogRepository
     {
+        private bool _missed;
+
         public List<CancellationToken> Tokens { get; } = [];
 
         public Task<bool> ExistsAsync(int tenantId, string action, string detail, CancellationToken cancellationToken)
         {
             Tokens.Add(cancellationToken);
+            if (missFirstCheck && !_missed)
+            {
+                _missed = true;
+                return Task.FromResult(false);
+            }
+
             return inner.ExistsAsync(tenantId, action, detail, cancellationToken);
         }
 
@@ -176,6 +246,12 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         {
             Tokens.Add(cancellationToken);
             return inner.AddAsync(entry, cancellationToken);
+        }
+
+        public Task<bool> TryAddUniqueAsync(Domain.AuditLog entry, CancellationToken cancellationToken)
+        {
+            Tokens.Add(cancellationToken);
+            return inner.TryAddUniqueAsync(entry, cancellationToken);
         }
     }
 

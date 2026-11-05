@@ -335,6 +335,9 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
 
         public Task AddAsync(AuditLog entry, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Database unavailable.");
+
+        public Task<bool> TryAddUniqueAsync(AuditLog entry, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Database unavailable.");
     }
 
     /// <summary>
