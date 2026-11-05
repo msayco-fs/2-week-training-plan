@@ -316,6 +316,48 @@ needs a `PlatformAdmin` caller too (no per-tenant check: the dashboard covers
 every tenant); see the dashboard note under
 [Quarterly report emails](#quarterly-report-emails).
 
+#### Async and cancellation: what stays synchronous
+
+The report pipeline is async from end to end. The caller's token (the
+request-aborted token over HTTP, Hangfire's shutdown token in a job) reaches
+every database query, the CSV write, the zip, the provider lookup and the
+send. The invoices are streamed (`IAsyncEnumerable<InvoiceSummary>` read with
+`await foreach`): each row goes from the query straight to the CSV file, so a
+large quarter is never held in memory. The database query stays open while
+the file is written.
+
+`NoBlockingCallsTests` fails the build on `.Result`, `.Wait()`,
+`GetAwaiter().GetResult()`, `Task.Run` or `async void` in `backend/`.
+
+A few calls stay synchronous on purpose. .NET has no async version of them,
+and wrapping them in `Task.Run` would only move the wait to another thread.
+Each one is a single metadata operation on the local disk, not a data
+transfer:
+
+| Call | Where | Why it is acceptable |
+| --- | --- | --- |
+| `Directory.CreateDirectory` | `QuarterlyReportCsvWriter`, `FailedReportEmailLogFile` | Returns at once when the folder exists, which is every run after the first. |
+| `File.Move(temp, path, overwrite: true)` | `QuarterlyReportCsvWriter` | A rename on the same volume. It is what makes the report replace atomic. |
+| `File.Delete` | `QuarterlyReportCsvWriter` (temp cleanup), `FailedReportEmailLogFile` (retention) | Cleanup only. Failures are ignored and retried on the next run or day. |
+| `File.Exists` | `QuarterlyReportEmailJob` | Checks the CSV is there before claiming the email. |
+| `File.GetLastWriteTime` | `QuarterlyReportZip` | Sets the zip entry's date. |
+| `new FileInfo(path).Length` | `QuarterlyReportEmailJob` | Only in the "too large" log message. |
+| `File.WriteAllText` probe | `FailedReportEmailLogFile.CheckDirectory` | Runs once at startup, before any request or job. |
+| `IBackgroundJobClient.Enqueue` | Scheduler, report job, email job | Hangfire's API is synchronous. It writes one job row to Hangfire's storage. |
+
+The `CancellationToken.None` uses in `backend/` are also intentional:
+
+- **Hangfire placeholders** in `Enqueue(...)` and the recurring job: Hangfire
+  replaces them with its shutdown token when the job runs.
+- **Releasing an email claim** after a failure or a cancel: the cleanup must
+  run even when the job's token is already cancelled.
+- **Marking an email sent**: the email is already out, so the record must be
+  saved.
+- **Failure audit writes** (and their duplicate check): a failure must be
+  recorded even while the job is stopping.
+- **SMTP `DisconnectAsync` after the server accepted the email**: a failed
+  QUIT must not undo a send.
+
 ### Quarterly report emails
 
 After `QuarterlyReportJob` writes a tenant's CSV, `QuarterlyReportEmailJob`
