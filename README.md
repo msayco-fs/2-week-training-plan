@@ -312,7 +312,8 @@ request's token reaches every database query and the file write, and no CSV,
 "generated" audit entry or email job is recorded.
 
 The Hangfire dashboard's **Trigger now** is a second way to run the job. It
-does not use `TenantAccess`; see the dashboard note under
+needs a `PlatformAdmin` caller too (no per-tenant check: the dashboard covers
+every tenant); see the dashboard note under
 [Quarterly report emails](#quarterly-report-emails).
 
 ### Quarterly report emails
@@ -354,9 +355,18 @@ To check the emails by hand:
    `quarterly-report.<quarter>.t<tenant>.u<user>@...`.
 4. Trigger the job again. No new emails should arrive.
 
-In Development the Hangfire dashboard accepts any caller, so it works through
-Docker's port mapping. Compose publishes the port on `127.0.0.1` only. In
-every other environment the dashboard accepts local requests only.
+The dashboard can trigger and delete jobs for every tenant. By default it
+needs both a request from the same machine and an authenticated caller with
+the `PlatformAdmin` role (`401` without a token, `403` otherwise). The caller
+is authenticated with the app's JWT bearer scheme, so a browser must send the
+`Authorization` header (for example through a header-injecting extension or
+an authenticating reverse proxy).
+
+In Development, `appsettings.Development.json` sets
+`Hangfire:Dashboard:AllowAnyCallerInDevelopment` to `true`, so the dashboard
+accepts any caller and works through Docker's port mapping. Compose publishes
+the port on `127.0.0.1` only. Set it to `false` to test the admin check
+locally. The setting is ignored outside Development.
 
 #### Settings
 
