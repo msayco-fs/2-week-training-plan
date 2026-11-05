@@ -284,6 +284,37 @@ authenticated), `403` (not allowed to access that tenant, empty body), `404`
 exceeded; `RateLimiting:PerCaller` defaults to 60 requests per minute per
 subject).
 
+#### Run a quarterly report now (administrators)
+
+`POST /api/admin/quarterly-reports/{year}/{quarter}`
+
+Builds one tenant's quarterly CSV inside the request, then queues its emails
+in Hangfire. A quarter that was already reported is not built again; only its
+emails are queued again (people who already got the email are skipped).
+
+| Input | Where | Rules |
+| --- | --- | --- |
+| `year`, `quarter` | path | Year 2000–2100, quarter 1–4. |
+| `X-Dealer-Id` | header | Required. Tenant key, same rules as above. |
+| `Authorization` | header | Required. `Bearer <JWT>` with the `PlatformAdmin` role. |
+
+Two checks, both required: the `PlatformAdmin` role (`[Authorize(Roles = ...)]`),
+then the same `TenantAccess` policy as the monthly report. A standard user
+gets `403`, even for their own tenant. Each call is audited as
+`TriggerQuarterlyInvoiceReport` with the caller's subject.
+
+`200 OK`: `{ "tenantKey": "dealer-alpha", "quarter": "2026-Q3", "result": "Generated" }`
+(`result` is `Generated` or `AlreadyGenerated`).
+
+Errors: `400` (bad year, quarter or tenant header), `401`, `403`, `404`
+(unknown tenant), `429`. If the caller disconnects, the run is cancelled: the
+request's token reaches every database query and the file write, and no CSV,
+"generated" audit entry or email job is recorded.
+
+The Hangfire dashboard's **Trigger now** is a second way to run the job. It
+does not use `TenantAccess`; see the dashboard note under
+[Quarterly report emails](#quarterly-report-emails).
+
 ### Quarterly report emails
 
 After `QuarterlyReportJob` writes a tenant's CSV, `QuarterlyReportEmailJob`

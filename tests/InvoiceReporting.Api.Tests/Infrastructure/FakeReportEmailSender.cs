@@ -43,8 +43,19 @@ public sealed class FakeReportEmailSender : IReportEmailSender
         set => Volatile.Write(ref _failNextLookups, value);
     }
 
+    /// <summary>Runs at the start of each send, for example to cancel the job's token mid-send.</summary>
+    public Action? OnSend { get; set; }
+
+    /// <summary>Runs at the start of each lookup, for example to cancel the job's token mid-lookup.</summary>
+    public Action? OnLookup { get; set; }
+
     public async Task SendAsync(ReportEmail email, CancellationToken cancellationToken)
     {
+        OnSend?.Invoke();
+
+        // Like MailKit and HttpClient: a cancelled token stops the call.
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (TryConsume(ref _failNextSends))
         {
             throw FailureKind switch
@@ -66,6 +77,9 @@ public sealed class FakeReportEmailSender : IReportEmailSender
     public Task<PriorSendStatus> FindPriorSendAsync(string idempotencyKey, CancellationToken cancellationToken)
     {
         _lookups.Enqueue(idempotencyKey);
+
+        OnLookup?.Invoke();
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (TryConsume(ref _failNextLookups))
         {

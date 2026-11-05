@@ -6,6 +6,9 @@ public static class AuditActions
 
     public const string GenerateQuarterlyInvoiceReport = "GenerateQuarterlyInvoiceReport";
 
+    /// <summary>A platform administrator ran a tenant's quarterly report by hand over the API.</summary>
+    public const string TriggerQuarterlyInvoiceReport = "TriggerQuarterlyInvoiceReport";
+
     public const string EmailQuarterlyInvoiceReport = "EmailQuarterlyInvoiceReport";
 
     /// <summary>

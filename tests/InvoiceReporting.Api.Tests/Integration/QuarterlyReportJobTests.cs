@@ -66,17 +66,117 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         });
     }
 
+    [Fact]
+    public async Task RunAsync_PassesTheCallersTokenToEveryRepositoryCall_AndReportsGenerated()
+    {
+        var tenantId = await TenantAIdAsync();
+        using var cts = new CancellationTokenSource();
+
+        var (result, invoices, audits) = await factory.WithDbAsync(async db =>
+        {
+            var invoices = new CapturingInvoiceRepository(new InvoiceRepository(db));
+            var audits = new CapturingAuditLogRepository(new AuditLogRepository(db));
+            var result = await CreateJob(db, invoices, audits).RunAsync(tenantId, 2019, 1, cts.Token);
+            return (result, invoices, audits);
+        });
+
+        Assert.Equal(QuarterlyReportRunResult.Generated, result);
+        Assert.Equal([cts.Token], invoices.Tokens);
+        // ExistsAsync, then AddAsync.
+        Assert.Equal([cts.Token, cts.Token], audits.Tokens);
+        Assert.True(File.Exists(CsvPath(tenantId, "2019-Q1")));
+        Assert.Single(_jobs.Created);
+    }
+
+    /// <summary>Uses the real repositories, so this also proves EF Core receives the token.</summary>
+    [Fact]
+    public async Task RunAsync_WithACancelledToken_Throws_AndWritesQueuesAndAuditsNothing()
+    {
+        var tenantId = await TenantAIdAsync();
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            factory.WithDbAsync(db => CreateJob(db).RunAsync(tenantId, 2019, 2, cts.Token)));
+
+        Assert.False(File.Exists(CsvPath(tenantId, "2019-Q2")));
+        Assert.Empty(_jobs.Created);
+        Assert.False(await GeneratedAuditExistsAsync(tenantId, "2019-Q2"));
+    }
+
+    [Fact]
+    public async Task RunAsync_WhenCancelledAfterTheQuery_StopsBeforeTheCsvAndTheAuditEntry()
+    {
+        var tenantId = await TenantAIdAsync();
+        using var cts = new CancellationTokenSource();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            factory.WithDbAsync(db =>
+            {
+                var invoices = new CapturingInvoiceRepository(new InvoiceRepository(db), afterQuery: cts.Cancel);
+                return CreateJob(db, invoices).RunAsync(tenantId, 2019, 3, cts.Token);
+            }));
+
+        Assert.False(File.Exists(CsvPath(tenantId, "2019-Q3")));
+        Assert.Empty(_jobs.Created);
+        Assert.False(await GeneratedAuditExistsAsync(tenantId, "2019-Q3"));
+    }
+
     private readonly FakeBackgroundJobClient _jobs = new();
 
-    private QuarterlyReportJob CreateJob(Data.ReportingDbContext db)
+    private QuarterlyReportJob CreateJob(
+        Data.ReportingDbContext db,
+        IInvoiceRepository? invoices = null,
+        IAuditLogRepository? audits = null)
     {
         var writer = new QuarterlyReportCsvWriter(
             Options.Create(new QuarterlyReportOutputOptions { Directory = _outputDirectory }),
             factory.Services.GetRequiredService<IHostEnvironment>());
         return new QuarterlyReportJob(
-            new InvoiceRepository(db),
-            new AuditLogRepository(db),
+            invoices ?? new InvoiceRepository(db),
+            audits ?? new AuditLogRepository(db),
             TimeProvider.System, writer, _jobs, NullLogger<QuarterlyReportJob>.Instance);
+    }
+
+    private string CsvPath(int tenantId, string quarter) => Path.Combine(_outputDirectory, $"{quarter}-tenant-{tenantId}.csv");
+
+    private Task<int> TenantAIdAsync() =>
+        factory.WithDbAsync(db => db.Tenants.Where(t => t.Key == TestData.TenantAKey).Select(t => t.Id).SingleAsync());
+
+    private Task<bool> GeneratedAuditExistsAsync(int tenantId, string quarter) =>
+        factory.WithDbAsync(db => db.AuditLogs.AnyAsync(a =>
+            a.TenantId == tenantId && a.Action == Domain.AuditActions.GenerateQuarterlyInvoiceReport && a.Detail == quarter));
+
+    /// <summary>Records the token of each call. Can run an action after the query, for example to cancel.</summary>
+    private sealed class CapturingInvoiceRepository(IInvoiceRepository inner, Action? afterQuery = null) : IInvoiceRepository
+    {
+        public List<CancellationToken> Tokens { get; } = [];
+
+        public async Task<IReadOnlyList<InvoiceSummary>> GetSummariesAsync(
+            int tenantId, DateOnly fromInclusive, DateOnly toExclusive, CancellationToken cancellationToken)
+        {
+            Tokens.Add(cancellationToken);
+            var result = await inner.GetSummariesAsync(tenantId, fromInclusive, toExclusive, cancellationToken);
+            afterQuery?.Invoke();
+            return result;
+        }
+    }
+
+    private sealed class CapturingAuditLogRepository(IAuditLogRepository inner) : IAuditLogRepository
+    {
+        public List<CancellationToken> Tokens { get; } = [];
+
+        public Task<bool> ExistsAsync(int tenantId, string action, string detail, CancellationToken cancellationToken)
+        {
+            Tokens.Add(cancellationToken);
+            return inner.ExistsAsync(tenantId, action, detail, cancellationToken);
+        }
+
+        public Task AddAsync(Domain.AuditLog entry, CancellationToken cancellationToken)
+        {
+            Tokens.Add(cancellationToken);
+            return inner.AddAsync(entry, cancellationToken);
+        }
     }
 
     public void Dispose()
