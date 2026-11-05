@@ -1,3 +1,4 @@
+using InvoiceReporting.Api.Data.Repositories;
 using InvoiceReporting.Api.Tenancy;
 using InvoiceReporting.Api.Tests.Infrastructure;
 
@@ -6,7 +7,7 @@ namespace InvoiceReporting.Api.Tests.Tenancy;
 public sealed class TenantResolverTests(InvoiceReportApiFactory factory) : IClassFixture<InvoiceReportApiFactory>
 {
     private Task<TenantResolutionResult> ResolveAsync(string? key) =>
-        factory.WithDbAsync(db => new TenantResolver(db).ResolveAsync(key, CancellationToken.None));
+        factory.WithDbAsync(db => new TenantResolver(new TenantRepository(db)).ResolveAsync(key, CancellationToken.None));
 
     [Theory]
     [InlineData(null)]

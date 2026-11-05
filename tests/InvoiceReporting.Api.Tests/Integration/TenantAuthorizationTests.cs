@@ -290,6 +290,85 @@ public sealed class TenantAuthorizationTests(InvoiceReportApiFactory factory) : 
         await AssertNoReportDataAsync(response);
     }
 
+    // ---- Denials are logged for probe detection
+
+    [Fact]
+    public async Task CrossTenantRequest_Returns403_AndLogsOneTenantAccessDeniedEvent()
+    {
+        // Without this, a broken handler wiring would still return 403s while
+        // probe alerting (event 4030, counted into 4031) silently stops.
+        var subject = HttpRequestBuilder.NewSubject();
+        var request = HttpRequestBuilder.MonthlyReport(
+            TestData.ReportMonth, TestData.TenantBKey, subject, tenantClaim: TestData.TenantAKey);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        var entry = Assert.Single(TenantAccessEntriesFor(subject));
+        Assert.Equal(4030, entry.EventId.Id);
+        Assert.Equal("TenantAccessDenied", entry.EventId.Name);
+        Assert.Equal(TestData.TenantBKey, entry.State["RequestedTenant"]);
+        Assert.Equal("TenantMismatch", entry.State["Reason"]);
+    }
+
+    [Fact]
+    public async Task SameTenantRequest_Returns200_AndLogsNoTenantAccessDeniedEvent()
+    {
+        var subject = HttpRequestBuilder.NewSubject();
+        var request = HttpRequestBuilder.MonthlyReport(
+            TestData.ReportMonth, TestData.TenantAKey, subject, tenantClaim: TestData.TenantAKey);
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Empty(TenantAccessEntriesFor(subject));
+    }
+
+    [Theory]
+    [InlineData(TestData.TenantAKey)]
+    [InlineData(null)]
+    public async Task UnauthenticatedRequest_Returns401_BeforeTheTenantHandlerRuns(string? dealerId)
+    {
+        var request = HttpRequestBuilder.MonthlyReport(TestData.ReportMonth, dealerId, subject: null);
+
+        var response = await _client.SendAsync(request);
+
+        // [Authorize] on the controller rejects the call first, so the handler's
+        // NotAuthenticated branch is never reached over HTTP.
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Empty(TenantAccessEntriesWhere(e => Equals(e.State.GetValueOrDefault("Reason"), "NotAuthenticated")));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" ")]
+    public async Task NoUsableTenant_Returns400_BeforeTheTenantHandlerRuns(string? dealerId)
+    {
+        var subject = HttpRequestBuilder.NewSubject();
+        var request = HttpRequestBuilder.MonthlyReport(TestData.ReportMonth, dealerId, subject, tenantClaim: null);
+
+        var response = await _client.SendAsync(request);
+
+        // The controller returns 400 when the tenant resolver finds no key, so
+        // the handler's NoTenantRequested branch is never reached over HTTP.
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Empty(TenantAccessEntriesFor(subject));
+    }
+
+    // The logger is shared by every test in this class, so match on the subject.
+    private List<CapturingLogger<TenantAccessHandler>.LogEntry> TenantAccessEntriesFor(string subject) =>
+        TenantAccessEntriesWhere(e => Equals(e.State.GetValueOrDefault("Subject"), subject));
+
+    private List<CapturingLogger<TenantAccessHandler>.LogEntry> TenantAccessEntriesWhere(
+        Func<CapturingLogger<TenantAccessHandler>.LogEntry, bool> match)
+    {
+        lock (factory.TenantAccessLogger.Entries)
+        {
+            return factory.TenantAccessLogger.Entries.Where(match).ToList();
+        }
+    }
+
     private static async Task AssertNoReportDataAsync(HttpResponseMessage response)
     {
         var body = await response.Content.ReadAsStringAsync();

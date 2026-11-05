@@ -2,7 +2,9 @@ using System.Globalization;
 using System.Net;
 using System.Security.Claims;
 using System.Threading.RateLimiting;
+using Hangfire;
 using InvoiceReporting.Api.Data;
+using InvoiceReporting.Api.Data.Repositories;
 using InvoiceReporting.Api.Reporting;
 using InvoiceReporting.Api.Security;
 using InvoiceReporting.Api.Tenancy;
@@ -22,9 +24,22 @@ builder.Services.AddOpenApi();
 builder.Services.AddDbContext<ReportingDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("Reporting")));
 
+builder.Services.AddHangfire(configuration => configuration
+    .UseSimpleAssemblyNameTypeSerializer()
+    .UseRecommendedSerializerSettings()
+    .UseSqlServerStorage(builder.Configuration.GetConnectionString("Hangfire")));
+builder.Services.AddHangfireServer();
+
+// Quarterly report jobs, email sending and their settings (see QuarterlyReportingSetup).
+builder.Services.AddQuarterlyReporting(builder.Configuration);
+builder.AddFailedReportEmailLogFile();
+
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ITenantResolver, TenantResolver>();
 builder.Services.AddScoped<IInvoiceReportService, InvoiceReportService>();
+builder.Services.AddScoped<ITenantRepository, TenantRepository>();
+builder.Services.AddScoped<IInvoiceRepository, InvoiceRepository>();
+builder.Services.AddScoped<IAuditLogRepository, AuditLogRepository>();
 
 // JWT bearer settings (authority, issuer, audiences) are bound from the
 // "Authentication:Schemes:Bearer" configuration section. Local development
@@ -105,6 +120,9 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
+app.ScheduleQuarterlyReports();
+app.CheckFailedReportEmailLogFolder();
+
 // First, so every later middleware (HTTPS redirection, rate limiting) sees the
 // real client address and scheme.
 app.UseForwardedHeaders();
@@ -126,6 +144,12 @@ app.UseAuthentication();
 // authorization so anonymous floods are throttled too.
 app.UseRateLimiter();
 app.UseAuthorization();
+
+// Outside Development, Hangfire's default applies: requests from this machine
+// only. Development also allows requests through Docker's port mapping.
+app.UseHangfireDashboard(options: app.Environment.IsDevelopment()
+    ? new DashboardOptions { Authorization = [new DevelopmentDashboardAuthorizationFilter()] }
+    : new DashboardOptions());
 
 // Applied to every controller, so new endpoints are limited by default.
 app.MapControllers().RequireRateLimiting(RateLimitPolicies.PerCaller);

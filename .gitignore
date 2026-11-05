@@ -509,3 +509,19 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# graphify knowledge graph output
+graphify-out/
+
+# local to-do notes
+TODO-later.md
+
+# local Claude Code config
+.claude/
+/CLAUDE.md
+
+# generated quarterly report CSV files
+backend/InvoiceReporting.Api/reports/
+
+# failed report email log files (support reads these on the server)
+backend/InvoiceReporting.Api/logs/

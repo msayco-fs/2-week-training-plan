@@ -1,10 +1,9 @@
 using System.Text.RegularExpressions;
-using InvoiceReporting.Api.Data;
-using Microsoft.EntityFrameworkCore;
+using InvoiceReporting.Api.Data.Repositories;
 
 namespace InvoiceReporting.Api.Tenancy;
 
-public sealed partial class TenantResolver(ReportingDbContext db) : ITenantResolver
+public sealed partial class TenantResolver(ITenantRepository tenants) : ITenantResolver
 {
     /// <summary>Header carrying the requested tenant key.</summary>
     public const string TenantHeaderName = "X-Dealer-Id";
@@ -24,11 +23,7 @@ public sealed partial class TenantResolver(ReportingDbContext db) : ITenantResol
             return TenantResolutionResult.Malformed;
         }
 
-        var tenant = await db.Tenants
-            .AsNoTracking()
-            .Where(t => t.Key == normalizedKey)
-            .Select(t => new ResolvedTenant(t.Id, t.Key))
-            .SingleOrDefaultAsync(cancellationToken);
+        var tenant = await tenants.FindByKeyAsync(normalizedKey, cancellationToken);
 
         return tenant is null ? TenantResolutionResult.NotFound(normalizedKey) : TenantResolutionResult.Success(tenant);
     }

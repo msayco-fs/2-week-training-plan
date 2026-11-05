@@ -27,6 +27,11 @@ public sealed partial class TenantAccessHandler(ILogger<TenantAccessHandler> log
         TenantAccessRequirement requirement,
         TenantScope resource)
     {
+        // Defensive: the first two checks are not reached over HTTP today.
+        // [Authorize] returns 401 before an unauthenticated caller gets here,
+        // and the controller returns 400 when no tenant key resolves. They
+        // stay so the policy still fails closed if a new endpoint skips
+        // either step. TenantAuthorizationTests checks both paths.
         if (context.User.Identity?.IsAuthenticated != true)
         {
             LogDenied(context.User, resource, "NotAuthenticated");

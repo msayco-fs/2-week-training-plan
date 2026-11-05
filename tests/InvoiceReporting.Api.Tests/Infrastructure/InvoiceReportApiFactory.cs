@@ -1,4 +1,5 @@
 using InvoiceReporting.Api.Data;
+using InvoiceReporting.Api.Security;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -8,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace InvoiceReporting.Api.Tests.Infrastructure;
 
@@ -15,8 +17,11 @@ namespace InvoiceReporting.Api.Tests.Infrastructure;
 /// Hosts the real application pipeline with two substitutions:
 /// <list type="bullet">
 /// <item>SQL Server is replaced by a private SQLite in-memory database, created and seeded per factory instance.</item>
+/// <item>Hangfire's SQL Server storage is replaced by in-memory storage.</item>
 /// <item>JWT bearer is replaced by <see cref="TestAuthHandler"/> as the default scheme.
 /// Placeholder JWT bearer settings are supplied only to pass the startup check.</item>
+/// <item>The <see cref="TenantAccessHandler"/> logger is replaced by <see cref="TenantAccessLogger"/>,
+/// so tests can check the denial events a real request writes.</item>
 /// </list>
 /// SQLite is relational (foreign keys, unique indexes, real SQL translation) but does
 /// not validate SQL Server-specific behaviour such as collation or decimal precision.
@@ -24,6 +29,12 @@ namespace InvoiceReporting.Api.Tests.Infrastructure;
 public sealed class InvoiceReportApiFactory : WebApplicationFactory<Program>
 {
     private readonly SqliteConnection _connection = new("DataSource=:memory:");
+
+    /// <summary>
+    /// Receives every log entry of the app's <see cref="TenantAccessHandler"/>.
+    /// Shared by all tests that use this factory, so filter entries by subject.
+    /// </summary>
+    public CapturingLogger<TenantAccessHandler> TenantAccessLogger { get; } = new();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -35,11 +46,20 @@ public sealed class InvoiceReportApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("Authentication:Schemes:Bearer:Authority", "https://identity.test.invalid/");
         builder.UseSetting("Authentication:Schemes:Bearer:ValidAudiences:0", "invoice-reporting-tests");
 
+        // Keeps the failed-email log folder out of the backend project folder.
+        builder.UseSetting(
+            "Reporting:Email:FailedLogDirectory",
+            Path.Combine(Path.GetTempPath(), "invoice-reporting-tests", "logs"));
+
         builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<DbContextOptions<ReportingDbContext>>();
             services.RemoveAll<IDbContextOptionsConfiguration<ReportingDbContext>>();
             services.AddDbContext<ReportingDbContext>(options => options.UseSqlite(_connection));
+            services.UseInMemoryHangfire();
+
+            // The handler is a singleton, so it takes this logger once at startup.
+            services.AddSingleton<ILogger<TenantAccessHandler>>(TenantAccessLogger);
 
             services
                 .AddAuthentication(TestAuthHandler.SchemeName)

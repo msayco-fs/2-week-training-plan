@@ -83,7 +83,65 @@ namespace InvoiceReporting.Api.Data.Migrations
 
                     b.HasIndex("TenantId", "IssuedDate");
 
+                    SqlServerIndexBuilderExtensions.IncludeProperties(b.HasIndex("TenantId", "IssuedDate"), new[] { "CustomerName", "Amount" });
+
                     b.ToTable("Invoices");
+                });
+
+            modelBuilder.Entity("InvoiceReporting.Api.Domain.QuarterlyReportEmailDelivery", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<Guid>("ClaimToken")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("ClaimedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Quarter")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<DateTime?>("SentAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<int>("TenantId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("TenantId", "UserId", "Quarter")
+                        .IsUnique();
+
+                    b.ToTable("QuarterlyReportEmailDeliveries");
+                });
+
+            modelBuilder.Entity("InvoiceReporting.Api.Domain.QuarterlyReportRecipient", b =>
+                {
+                    b.Property<int>("UserId")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("WillReceiveReport")
+                        .HasColumnType("bit");
+
+                    b.HasKey("UserId");
+
+                    b.ToTable("QuarterlyReportRecipients");
                 });
 
             modelBuilder.Entity("InvoiceReporting.Api.Domain.Tenant", b =>
@@ -112,6 +170,58 @@ namespace InvoiceReporting.Api.Data.Migrations
                     b.ToTable("Tenants");
                 });
 
+            modelBuilder.Entity("InvoiceReporting.Api.Domain.User", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(254)
+                        .HasColumnType("nvarchar(254)");
+
+                    b.Property<bool>("IsPlatformAdmin")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Subject")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<int?>("TenantId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Subject")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("Users", t =>
+                        {
+                            t.HasCheckConstraint("CK_Users_TenantRequiredForStandardUsers", "IsPlatformAdmin = 1 OR TenantId IS NOT NULL");
+                        });
+                });
+
+            modelBuilder.Entity("InvoiceReporting.Api.Domain.UserTenantAssignment", b =>
+                {
+                    b.Property<int>("UserId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("TenantId")
+                        .HasColumnType("int");
+
+                    b.HasKey("UserId", "TenantId");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("UserTenantAssignments");
+                });
+
             modelBuilder.Entity("InvoiceReporting.Api.Domain.AuditLog", b =>
                 {
                     b.HasOne("InvoiceReporting.Api.Domain.Tenant", "Tenant")
@@ -134,9 +244,75 @@ namespace InvoiceReporting.Api.Data.Migrations
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("InvoiceReporting.Api.Domain.QuarterlyReportEmailDelivery", b =>
+                {
+                    b.HasOne("InvoiceReporting.Api.Domain.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("InvoiceReporting.Api.Domain.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("InvoiceReporting.Api.Domain.QuarterlyReportRecipient", b =>
+                {
+                    b.HasOne("InvoiceReporting.Api.Domain.User", "User")
+                        .WithOne("QuarterlyReportRecipient")
+                        .HasForeignKey("InvoiceReporting.Api.Domain.QuarterlyReportRecipient", "UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("InvoiceReporting.Api.Domain.User", b =>
+                {
+                    b.HasOne("InvoiceReporting.Api.Domain.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("InvoiceReporting.Api.Domain.UserTenantAssignment", b =>
+                {
+                    b.HasOne("InvoiceReporting.Api.Domain.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("InvoiceReporting.Api.Domain.User", "User")
+                        .WithMany("TenantAssignments")
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("InvoiceReporting.Api.Domain.Tenant", b =>
                 {
                     b.Navigation("Invoices");
+                });
+
+            modelBuilder.Entity("InvoiceReporting.Api.Domain.User", b =>
+                {
+                    b.Navigation("QuarterlyReportRecipient");
+
+                    b.Navigation("TenantAssignments");
                 });
 #pragma warning restore 612, 618
         }
