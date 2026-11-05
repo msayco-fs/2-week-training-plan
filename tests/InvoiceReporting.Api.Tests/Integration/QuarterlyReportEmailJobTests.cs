@@ -520,6 +520,41 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
         Assert.Empty(await AuditDetailsAsync(AuditActions.EmailQuarterlyInvoiceReport, tenantId, "2019-Q3"));
     }
 
+    /// <summary>
+    /// The tenant name is read just before sending. A cancel there means
+    /// nothing was sent, so the claim is freed and a retry can send at once.
+    /// </summary>
+    [Fact]
+    public async Task SendAsync_WhenCancelledWhileReadingTheTenantName_ReleasesTheClaim_AndRecordsNoFailure()
+    {
+        var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
+        await WriteCsvAsync(tenantId, new ReportingQuarter(2017, 1));
+        using var cts = new CancellationTokenSource();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            RunAsync(job => job.SendAsync(tenantId, userId, 2017, 1, null, cts.Token), cancelOnTenantName: cts));
+
+        Assert.Empty(_sender.Sent);
+        Assert.Null(await FindDeliveryAsync(tenantId, userId, "2017-Q1"));
+        await AssertNoFailureRecordedAsync(tenantId, "2017-Q1");
+    }
+
+    /// <summary>Cancels the job's token when the tenant name is read, then reads it with that token.</summary>
+    private sealed class CancelOnTenantNameRepository(ITenantRepository inner, CancellationTokenSource cts) : ITenantRepository
+    {
+        public Task<Api.Tenancy.ResolvedTenant?> FindByKeyAsync(string normalizedKey, CancellationToken cancellationToken) =>
+            inner.FindByKeyAsync(normalizedKey, cancellationToken);
+
+        public Task<IReadOnlyList<int>> GetAllIdsAsync(CancellationToken cancellationToken) =>
+            inner.GetAllIdsAsync(cancellationToken);
+
+        public async Task<string?> GetDisplayNameAsync(int tenantId, CancellationToken cancellationToken)
+        {
+            await cts.CancelAsync();
+            return await inner.GetDisplayNameAsync(tenantId, cancellationToken);
+        }
+    }
+
     private async Task AssertNoFailureRecordedAsync(int tenantId, string quarter)
     {
         Assert.Empty(await AuditDetailsAsync(AuditActions.EmailQuarterlyInvoiceReportAttemptFailed, tenantId, quarter));
@@ -569,10 +604,11 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
         Func<QuarterlyReportEmailJob, Task> action,
         bool enabled = true,
         long maxAttachmentBytes = QuarterlyReportEmailOptions.MaxAllowedAttachmentBytes,
-        CancellationTokenSource? cancelAfterClaim = null) =>
+        CancellationTokenSource? cancelAfterClaim = null,
+        CancellationTokenSource? cancelOnTenantName = null) =>
         factory.WithDbAsync(async db =>
         {
-            await action(CreateJob(db, enabled, maxAttachmentBytes, cancelAfterClaim: cancelAfterClaim));
+            await action(CreateJob(db, enabled, maxAttachmentBytes, cancelAfterClaim: cancelAfterClaim, cancelOnTenantName: cancelOnTenantName));
             return 0;
         });
 
@@ -581,10 +617,13 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
         bool enabled,
         long maxAttachmentBytes = QuarterlyReportEmailOptions.MaxAllowedAttachmentBytes,
         IAuditLogRepository? audits = null,
-        CancellationTokenSource? cancelAfterClaim = null) =>
+        CancellationTokenSource? cancelAfterClaim = null,
+        CancellationTokenSource? cancelOnTenantName = null) =>
         new(
             new ReportRecipientRepository(db),
-            new TenantRepository(db),
+            cancelOnTenantName is null
+                ? new TenantRepository(db)
+                : new CancelOnTenantNameRepository(new TenantRepository(db), cancelOnTenantName),
             cancelAfterClaim is null
                 ? new EmailDeliveryRepository(db)
                 : new CancelAfterClaimRepository(new EmailDeliveryRepository(db), cancelAfterClaim),

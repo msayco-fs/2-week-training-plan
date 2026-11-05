@@ -183,11 +183,15 @@ public sealed class QuarterlyReportEmailJob(
         // sent returns above instead of being recorded as too large. Zipping
         // stops at the limit, so a huge CSV is never held in memory. A retry
         // cannot make the zip smaller, so this frees the claim and returns
-        // instead of throwing.
+        // instead of throwing. The tenant name is read here too, before the
+        // send: a cancel or error while reading it means nothing was sent,
+        // so the claim is freed rather than kept as if mid-send.
         byte[]? zip;
+        string tenantName;
         try
         {
             zip = await QuarterlyReportZip.CreateAsync(path, options.Value.MaxAttachmentBytes, cancellationToken);
+            tenantName = await tenants.GetDisplayNameAsync(tenantId, cancellationToken) ?? $"Tenant {tenantId}";
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -218,8 +222,6 @@ public sealed class QuarterlyReportEmailJob(
 
         try
         {
-            var tenantName = await tenants.GetDisplayNameAsync(tenantId, cancellationToken) ?? $"Tenant {tenantId}";
-
             await sender.SendAsync(new ReportEmail(
                 idempotencyKey,
                 toAddress,
