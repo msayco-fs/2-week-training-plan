@@ -25,15 +25,18 @@ public static class QuarterlyReportZip
         using var output = new MemoryStream();
         try
         {
-            using (var limited = new SizeLimitedStream(output, maxBytes))
-            using (var archive = new ZipArchive(limited, ZipArchiveMode.Create, leaveOpen: true))
+            // Async dispose: closing the archive writes the zip's index, so it
+            // goes through WriteAsync like the rest of the output.
+            await using (var limited = new SizeLimitedStream(output, maxBytes))
+            await using (var archive = await ZipArchive.CreateAsync(
+                limited, ZipArchiveMode.Create, leaveOpen: true, entryNameEncoding: null, cancellationToken))
             {
                 var entry = archive.CreateEntry(Path.GetFileName(csvPath), CompressionLevel.Optimal);
                 entry.LastWriteTime = File.GetLastWriteTime(csvPath);
 
                 await using var csv = new FileStream(
                     csvPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true);
-                await using var entryStream = entry.Open();
+                await using var entryStream = await entry.OpenAsync(cancellationToken);
                 await csv.CopyToAsync(entryStream, cancellationToken);
             }
         }
