@@ -421,6 +421,7 @@ How failures are handled:
 | No answer from Mailjet (the email may have gone out) | The claim is kept. After 5 minutes a retry asks Mailjet whether the email was sent, and sends only if it was not |
 | The CSV is missing | Retried, in case the report job is still writing it. The last retry is recorded as failed (`retries-exhausted:csv-missing`) |
 | Another job is still sending the same email | Retried later. The last retry is recorded as failed (`retries-exhausted:in-progress`) |
+| The job is stopped (server shutdown) | Not a failure: nothing is audited or logged as failed, and Hangfire runs the job again. Stopped before sending, the claim is freed. Stopped mid-send, the claim is kept, as for no answer above |
 
 #### Sending domain: SPF, DKIM and DMARC
 
