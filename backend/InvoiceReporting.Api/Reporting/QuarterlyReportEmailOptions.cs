@@ -15,7 +15,7 @@ public sealed class QuarterlyReportEmailOptions
     /// <summary>
     /// The largest value <see cref="MaxAttachmentBytes"/> may take. Mailjet
     /// rejects messages over 15 MB, and base64 encoding adds about a third,
-    /// so a 10 MB CSV is the most that fits safely.
+    /// so a 10 MB attachment is the most that fits safely.
     /// </summary>
     public const long MaxAllowedAttachmentBytes = 10 * 1024 * 1024;
 
@@ -26,8 +26,10 @@ public sealed class QuarterlyReportEmailOptions
     public EmailProvider Provider { get; set; } = EmailProvider.Smtp;
 
     /// <summary>
-    /// The largest CSV the job will email. Larger reports are not sent and are
-    /// recorded as failed for support. At most <see cref="MaxAllowedAttachmentBytes"/>.
+    /// The largest attachment the job will email. Reports are attached as a zip
+    /// (see <see cref="QuarterlyReportZip"/>), so this limits the zipped size, not
+    /// the CSV's. Larger reports are not sent and are recorded as failed for
+    /// support. At most <see cref="MaxAllowedAttachmentBytes"/>.
     /// </summary>
     public long MaxAttachmentBytes { get; set; } = MaxAllowedAttachmentBytes;
 

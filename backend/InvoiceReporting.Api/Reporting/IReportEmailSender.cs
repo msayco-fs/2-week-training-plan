@@ -30,7 +30,8 @@ public enum PriorSendStatus
 }
 
 /// <summary>
-/// One report email with a single CSV attachment. <paramref name="IdempotencyKey"/>
+/// One report email with a single attachment. <paramref name="AttachmentContentType"/>
+/// is a MIME type such as <c>text/csv</c> or <c>application/zip</c>. <paramref name="IdempotencyKey"/>
 /// is the same on every attempt for the same tenant, user and quarter. It
 /// becomes the Message-ID, so mail systems that drop duplicate Message-IDs
 /// can discard a repeat sent after a crash.
@@ -41,4 +42,5 @@ public sealed record ReportEmail(
     string Subject,
     string Body,
     string AttachmentFileName,
+    string AttachmentContentType,
     byte[] AttachmentContent);

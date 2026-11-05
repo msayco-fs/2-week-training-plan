@@ -44,7 +44,7 @@ public sealed partial class MailjetReportEmailSender(
                     TextPart: email.Body,
                     Attachments:
                     [
-                        new Attachment("text/csv", email.AttachmentFileName, Convert.ToBase64String(email.AttachmentContent)),
+                        new Attachment(email.AttachmentContentType, email.AttachmentFileName, Convert.ToBase64String(email.AttachmentContent)),
                     ],
                     CustomID: email.IdempotencyKey),
             ]);

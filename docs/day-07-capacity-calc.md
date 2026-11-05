@@ -11,9 +11,10 @@ Measured on 2026-11-03 against the local Docker SQL Server. Covers the per-tenan
 - **Run time at 4x volume:** a tenant with 250k rows per quarter today grows to
   1M rows, which takes about **3 s** measured and **10 s** at the planning rate.
   Run time is not the limit.
-- **Batching threshold:** the 10 MB email limit is reached first, at about
-  **214k rows** with typical customer names and **45.8k rows** with 200-character names.
-  Batch by CSV size, not run time.
+- **Email size limit:** reports are now emailed as a zip (2026-11-05), which
+  raises the 10 MB limit from about 214k to about **910k rows** with typical
+  customer names, and from 45.8k to about **248k rows** with 200-character names.
+  See [Email size limit](#email-size-limit).
 - **Problem found:** the report query scans the whole `Invoices` table for every
   tenant. Fixed with a covering index (see [Index finding](#index-finding)).
 
@@ -64,11 +65,12 @@ Hangfire runs tenants in parallel, so a full quarterly run takes about
 `total rows / (rows per second × worker count)`. The database is shared by all
 workers, so it is the limit.
 
-## Batching threshold
+## Email size limit
 
 `MaxAttachmentBytes` is 10 MB (10,485,760 bytes). Mailjet rejects messages over
-15 MB, and base64 adds about a third. A larger CSV is not emailed and is
-recorded as failed with reason `too-large`.
+15 MB, and base64 adds about a third.
+
+### Before: plain CSV attachment
 
 `max rows per email ≈ MaxAttachmentBytes / (29 + average name length)`
 
@@ -77,9 +79,36 @@ recorded as failed with reason `too-large`.
 | 20 characters (typical) | 48.9 | ~214k | ~53.6k |
 | 200 characters (worst case) | 228.9 | ~45.8k | ~11.4k |
 
-Recommendation: split the report by size. Start a new part at about 80% of
-`MaxAttachmentBytes` (8 MB). If a fixed row count is simpler, 40k rows per part
-is safe for any name length.
+### Now: zipped CSV attachment
+
+Since 2026-11-05 the email job attaches the CSV as a zip
+(`QuarterlyReportZip`). The limit applies to the zip, and a zip over it is
+recorded as failed with reason `too-large`. Zipping streams the CSV and stops
+at the limit, so memory stays near 10 MB however large the CSV is.
+
+Measured with the app's format and compression (`CompressionLevel.Optimal`) on
+fictitious CSVs. Customer names were drawn from a pool of about one per 50
+invoices, like repeat customers.
+
+| Rows | Names | CSV | Zip | Ratio | Zip bytes per row |
+| --- | --- | --- | --- | --- | --- |
+| 50k | 20 characters | 2.4 MB | 0.54 MB | 4.5x | 11.3 |
+| 200k | 20 characters | 9.6 MB | 2.18 MB | 4.4x | 11.4 |
+| 1M | 20 characters | 48.2 MB | 10.97 MB | 4.4x | 11.5 |
+| 50k | 200 characters | 11.0 MB | 1.88 MB | 5.8x | 39.5 |
+| 200k | 200 characters | 44.0 MB | 8.07 MB | 5.4x | 42.3 |
+
+`max rows per email ≈ MaxAttachmentBytes / zip bytes per row`
+
+| Names | Zip bytes per row | Max rows per email | Crosses the limit at 4x if today's rows exceed |
+| --- | --- | --- | --- |
+| 20 characters (typical) | 11.5 | ~910k | ~228k |
+| 200 characters (worst case) | 42.3 | ~248k | ~62k |
+
+Real names that repeat less compress less well, so treat these as upper
+bounds. If the production count from the open items below crosses these
+figures, split the report into several emails, starting a new part when its
+zip reaches about 80% of `MaxAttachmentBytes`.
 
 ## Index finding
 
@@ -124,7 +153,9 @@ tenant's Q3 2026 (about 126k rows):
    0.2 MB of the real files.
 3. Replace the example rows above with the production count to get a specific
    4x target.
-4. Batch reports by CSV size.
+4. ~~Batch reports by CSV size.~~ Replaced by zipping the CSV (2026-11-05), see
+   [Email size limit](#email-size-limit). Split into several emails only if the
+   production count crosses the zipped limits.
 
 The query is read-only and returns totals only, no customer data. It scans the
 whole `Invoices` table, so run it on a read replica or off-peak.

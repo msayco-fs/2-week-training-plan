@@ -23,7 +23,7 @@ public sealed class SmtpReportEmailSender(IOptions<QuarterlyReportEmailOptions> 
         message.Subject = email.Subject;
 
         var body = new BodyBuilder { TextBody = email.Body };
-        body.Attachments.Add(email.AttachmentFileName, email.AttachmentContent, new ContentType("text", "csv"));
+        body.Attachments.Add(email.AttachmentFileName, email.AttachmentContent, ContentType.Parse(email.AttachmentContentType));
         message.Body = body.ToMessageBody();
 
         using var client = new SmtpClient();

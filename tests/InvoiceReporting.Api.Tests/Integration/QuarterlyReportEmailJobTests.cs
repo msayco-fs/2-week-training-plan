@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using InvoiceReporting.Api.Data;
 using InvoiceReporting.Api.Data.Repositories;
 using InvoiceReporting.Api.Domain;
@@ -57,7 +58,7 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
     }
 
     [Fact]
-    public async Task SendAsync_EmailsTheCsv_AndASecondRunSendsNothing()
+    public async Task SendAsync_EmailsTheCsvZipped_AndASecondRunSendsNothing()
     {
         var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
         var csvPath = await WriteCsvAsync(tenantId, new ReportingQuarter(2026, 2));
@@ -69,8 +70,10 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
         Assert.Equal($"quarterly-report.2026-Q2.t{tenantId}.u{userId}", email.IdempotencyKey);
         Assert.Equal("alpha.user@example.com", email.ToAddress);
         Assert.Equal("Quarterly invoice report 2026-Q2 – Tenant A (test)", email.Subject);
-        Assert.Equal(Path.GetFileName(csvPath), email.AttachmentFileName);
-        Assert.Equal(await File.ReadAllBytesAsync(csvPath), email.AttachmentContent);
+        Assert.Equal("2026-Q2-tenant-" + tenantId + ".zip", email.AttachmentFileName);
+        Assert.Equal("application/zip", email.AttachmentContentType);
+        Assert.Contains("zipped CSV", email.Body);
+        Assert.Equal(await File.ReadAllBytesAsync(csvPath), Unzip(email.AttachmentContent, Path.GetFileName(csvPath)));
         // A fresh claim needs no provider lookup.
         Assert.Empty(_sender.Lookups);
     }
@@ -212,7 +215,7 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
     }
 
     [Fact]
-    public async Task SendAsync_WhenTheCsvIsOverTheLimit_RecordsTooLargeOnce_EvenWhenRunTwice()
+    public async Task SendAsync_WhenTheZipIsOverTheLimit_RecordsTooLargeOnce_EvenWhenRunTwice()
     {
         var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
         await WriteCsvAsync(tenantId, new ReportingQuarter(2024, 1));
@@ -231,7 +234,7 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
 
     /// <summary>Found by a compose run: a re-run with a lower limit flagged emails that had already gone out.</summary>
     [Fact]
-    public async Task SendAsync_WhenAlreadySent_AndTheCsvIsNowOverTheLimit_RecordsNoFailure()
+    public async Task SendAsync_WhenAlreadySent_AndTheZipIsNowOverTheLimit_RecordsNoFailure()
     {
         var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
         await WriteCsvAsync(tenantId, new ReportingQuarter(2021, 4));
@@ -245,11 +248,11 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
     }
 
     [Fact]
-    public async Task SendAsync_WhenTheCsvIsExactlyAtTheLimit_Sends()
+    public async Task SendAsync_WhenTheZipIsExactlyAtTheLimit_Sends()
     {
         var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
         var csvPath = await WriteCsvAsync(tenantId, new ReportingQuarter(2024, 2));
-        var size = new FileInfo(csvPath).Length;
+        var size = (await QuarterlyReportZip.CreateAsync(csvPath, long.MaxValue, CancellationToken.None))!.Length;
 
         await RunAsync(job => job.SendAsync(tenantId, userId, 2024, 2, null, CancellationToken.None), maxAttachmentBytes: size);
 
@@ -500,6 +503,20 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
 
     private Task<string> WriteCsvAsync(int tenantId, ReportingQuarter quarter) =>
         CreateCsvWriter().WriteAsync(tenantId, quarter, [], 0m, CancellationToken.None);
+
+    private static byte[] Unzip(byte[] zip, string expectedEntryName)
+    {
+        using var archive = new ZipArchive(new MemoryStream(zip), ZipArchiveMode.Read);
+        var entry = Assert.Single(archive.Entries);
+        Assert.Equal(expectedEntryName, entry.FullName);
+        using var content = new MemoryStream();
+        using (var entryStream = entry.Open())
+        {
+            entryStream.CopyTo(content);
+        }
+
+        return content.ToArray();
+    }
 
     private Task<(int TenantId, int UserId)> TenantAAndUserAsync(string subject) =>
         factory.WithDbAsync(async db => (

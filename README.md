@@ -337,7 +337,7 @@ Development (`Enabled: false`).
 | `Enabled` | `false` | Turns report email on |
 | `Provider` | `Smtp` | `Smtp` (Mailpit, local development) or `MailjetApi` (production) |
 | `FromAddress`, `FromName` | none, `Invoice Reporting` | Sender. The address must be on a verified sending domain |
-| `MaxAttachmentBytes` | `10485760` (10 MB) | Largest CSV that is emailed. Cannot be set above 10 MB |
+| `MaxAttachmentBytes` | `10485760` (10 MB) | Largest zipped report that is emailed. Cannot be set above 10 MB |
 | `FailedLogDirectory` | `logs` | Folder for the failed-email log files, relative to the app folder |
 | `FailedLogRetentionDays` | `90` | Days to keep failed-email log files |
 | `Host`, `Port`, `Security`, `Username`, `Password` | | SMTP only |
@@ -374,7 +374,7 @@ How failures are handled:
 
 | Failure | What the job does |
 | --- | --- |
-| CSV over `MaxAttachmentBytes` | Not sent, not retried. Recorded as failed (`too-large`) |
+| Zipped CSV over `MaxAttachmentBytes` | Not sent, not retried. Recorded as failed (`too-large`) |
 | Mailjet rejects the email (4xx other than 408/429) | Not retried. Recorded as failed (`rejected:http-<status>:<Mailjet code>`) |
 | Rate limit (429), timeout status (408), Mailjet error (5xx), no connection | Retried by Hangfire up to 5 times. Each attempt is audited; the last one is recorded as failed (`retries-exhausted:temporary`) |
 | No answer from Mailjet (the email may have gone out) | The claim is kept. After 5 minutes a retry asks Mailjet whether the email was sent, and sends only if it was not |

@@ -8,7 +8,8 @@ using Microsoft.Extensions.Options;
 namespace InvoiceReporting.Api.Reporting;
 
 /// <summary>
-/// Emails a tenant's quarterly CSV report to each recipient. Queued by
+/// Emails a tenant's quarterly CSV report, zipped (see <see cref="QuarterlyReportZip"/>),
+/// to each recipient. Queued by
 /// <see cref="QuarterlyReportJob"/> once the CSV exists. Each recipient gets a
 /// separate Hangfire job, so one bad address does not block the others.
 /// </summary>
@@ -25,7 +26,7 @@ namespace InvoiceReporting.Api.Reporting;
 /// sent (<see cref="IReportEmailSender.FindPriorSendAsync"/>) and only sends if
 /// not. SMTP cannot answer, so it sends again with the same Message-ID.
 ///
-/// Failures that a retry cannot fix (a CSV over the size limit, or an email the
+/// Failures that a retry cannot fix (a zipped report over the size limit, or an email the
 /// provider rejects) are not retried. They are written to the failed-email log
 /// file and to the audit log as <see cref="AuditActions.EmailQuarterlyInvoiceReportFailed"/>
 /// for support to review.
@@ -167,33 +168,47 @@ public sealed class QuarterlyReportEmailJob(
                 quarter, tenantId, userId, prior);
         }
 
-        // Checked after the claim, so a re-run of an email that was already
-        // sent returns above instead of being recorded as too large. Checked
-        // without reading the file. A retry cannot make the file smaller, so
-        // this frees the claim and returns instead of throwing.
-        var size = new FileInfo(path).Length;
-        if (size > options.Value.MaxAttachmentBytes)
+        // Zipped after the claim, so a re-run of an email that was already
+        // sent returns above instead of being recorded as too large. Zipping
+        // stops at the limit, so a huge CSV is never held in memory. A retry
+        // cannot make the zip smaller, so this frees the claim and returns
+        // instead of throwing.
+        byte[]? zip;
+        try
+        {
+            zip = await QuarterlyReportZip.CreateAsync(path, options.Value.MaxAttachmentBytes, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // Not sent, so free the claim and let the retry try again.
+            await deliveries.ReleaseAsync(claim, CancellationToken.None);
+            await RecordAttemptFailedAsync(tenantId, userId, quarter, ReportEmailFailureReasons.Temporary, retryCount, jobId, ex);
+            throw;
+        }
+
+        if (zip is null)
         {
             await deliveries.ReleaseAsync(claim, CancellationToken.None);
+            // The CSV size is logged: the zip's size is unknown once it passes the limit.
             logger.LogWarning(
-                "Report {Quarter} for tenant {TenantId} is {Size} bytes, over the {Limit}-byte email limit; not emailed to user {UserId}",
-                quarter, tenantId, size, options.Value.MaxAttachmentBytes, userId);
+                "Report {Quarter} for tenant {TenantId} ({CsvSize}-byte CSV) zips to over the {Limit}-byte email limit; not emailed to user {UserId}",
+                quarter, tenantId, new FileInfo(path).Length, options.Value.MaxAttachmentBytes, userId);
             await RecordFailedAsync(tenantId, userId, quarter, ReportEmailFailureReasons.TooLarge, jobId);
             return;
         }
 
         try
         {
-            var content = await File.ReadAllBytesAsync(path, cancellationToken);
             var tenantName = await tenants.GetDisplayNameAsync(tenantId, cancellationToken) ?? $"Tenant {tenantId}";
 
             await sender.SendAsync(new ReportEmail(
                 idempotencyKey,
                 toAddress,
                 Subject: $"Quarterly invoice report {quarter} – {tenantName}",
-                Body: $"Attached is the quarterly invoice report for {tenantName}, {quarter}.",
-                AttachmentFileName: Path.GetFileName(path),
-                AttachmentContent: content), cancellationToken);
+                Body: $"Attached is the quarterly invoice report for {tenantName}, {quarter}, as a zipped CSV file.",
+                AttachmentFileName: QuarterlyReportZip.GetFileName(path),
+                AttachmentContentType: QuarterlyReportZip.ContentType,
+                AttachmentContent: zip), cancellationToken);
         }
         catch (ReportEmailPermanentException ex)
         {

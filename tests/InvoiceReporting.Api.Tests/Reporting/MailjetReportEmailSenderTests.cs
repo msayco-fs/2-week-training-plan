@@ -35,8 +35,9 @@ public sealed class MailjetReportEmailSenderTests
         Assert.False(message.TryGetProperty("Bcc", out _));
         Assert.Equal("quarterly-report.2026-Q3.t1.u2", message.GetProperty("CustomID").GetString());
         var attachment = Assert.Single(message.GetProperty("Attachments").EnumerateArray());
-        Assert.Equal("text/csv", attachment.GetProperty("ContentType").GetString());
-        Assert.Equal("report.csv", attachment.GetProperty("Filename").GetString());
+        // Passed through from the email, not fixed by the sender.
+        Assert.Equal("application/zip", attachment.GetProperty("ContentType").GetString());
+        Assert.Equal("report.zip", attachment.GetProperty("Filename").GetString());
         Assert.Equal(CsvText, Encoding.UTF8.GetString(Convert.FromBase64String(attachment.GetProperty("Base64Content").GetString()!)));
     }
 
@@ -178,7 +179,8 @@ public sealed class MailjetReportEmailSenderTests
         ToAddress: Recipient,
         Subject: "Quarterly invoice report 2026-Q3 – Tenant A",
         Body: "Attached is the report.",
-        AttachmentFileName: "report.csv",
+        AttachmentFileName: "report.zip",
+        AttachmentContentType: "application/zip",
         AttachmentContent: Encoding.UTF8.GetBytes(CsvText));
 
     /// <summary>The exception chain must never carry keys, the address or report content.</summary>
