@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
 using Hangfire;
 using InvoiceReporting.Api.Controllers;
 using InvoiceReporting.Api.Data.Repositories;
@@ -222,15 +223,21 @@ public sealed class QuarterlyReportTriggerEndpointTests : IClassFixture<InvoiceR
         _factory.WithDbAsync(db => db.AuditLogs.AnyAsync(a =>
             a.TenantId == tenantId && a.Action == AuditActions.GenerateQuarterlyInvoiceReport && a.Detail == quarter));
 
-    /// <summary>Waits on the query until its token is cancelled, and reports that it was.</summary>
+    /// <summary>Waits on the invoice stream until its token is cancelled, and reports that it was.</summary>
     private sealed class BlockingInvoiceRepository : IInvoiceRepository
     {
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public TaskCompletionSource<bool> SawCancellation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public async Task<IReadOnlyList<InvoiceSummary>> GetSummariesAsync(
-            int tenantId, DateOnly fromInclusive, DateOnly toExclusive, CancellationToken cancellationToken)
+        // The quarterly job streams; only the monthly report uses the list.
+        public Task<IReadOnlyList<InvoiceSummary>> GetSummariesAsync(
+            int tenantId, DateOnly fromInclusive, DateOnly toExclusive, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public async IAsyncEnumerable<InvoiceSummary> StreamSummariesAsync(
+            int tenantId, DateOnly fromInclusive, DateOnly toExclusive,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             Started.TrySetResult();
             try
@@ -243,7 +250,7 @@ public sealed class QuarterlyReportTriggerEndpointTests : IClassFixture<InvoiceR
                 throw;
             }
 
-            return [];
+            yield break;
         }
     }
 

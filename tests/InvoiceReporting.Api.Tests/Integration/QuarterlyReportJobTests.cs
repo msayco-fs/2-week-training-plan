@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using InvoiceReporting.Api.Data.Repositories;
 using InvoiceReporting.Api.Reporting;
 using InvoiceReporting.Api.Tests.Infrastructure;
@@ -104,23 +105,72 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         Assert.False(await GeneratedAuditExistsAsync(tenantId, "2019-Q2"));
     }
 
+    /// <summary>
+    /// The invoices are streamed into the file. A cancel after the first row
+    /// is read must stop the run mid-file, with no report file, temp file,
+    /// audit entry or email job left behind.
+    /// </summary>
     [Fact]
-    public async Task RunAsync_WhenCancelledAfterTheQuery_StopsBeforeTheCsvAndTheAuditEntry()
+    public async Task RunAsync_WhenCancelledWhileStreamingTheInvoices_StopsBeforeTheAuditEntry_AndLeavesNoFiles()
     {
         var tenantId = await TenantAIdAsync();
+        await AddInvoicesAsync(tenantId, new DateOnly(2019, 8, 1), 3);
         using var cts = new CancellationTokenSource();
+        CapturingInvoiceRepository? invoices = null;
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             factory.WithDbAsync(db =>
             {
-                var invoices = new CapturingInvoiceRepository(new InvoiceRepository(db), afterQuery: cts.Cancel);
+                invoices = new CapturingInvoiceRepository(new InvoiceRepository(db), afterEachRow: cts.Cancel);
                 return CreateJob(db, invoices).RunAsync(tenantId, 2019, 3, cts.Token);
             }));
 
+        // Stopped before the end of the stream. Whether the second row is read
+        // depends on where the cancel is first seen: by EF Core or the file write.
+        Assert.InRange(invoices!.RowsRead, 1, 2);
         Assert.False(File.Exists(CsvPath(tenantId, "2019-Q3")));
+        Assert.False(File.Exists(CsvPath(tenantId, "2019-Q3") + ".tmp"));
         Assert.Empty(_jobs.Created);
         Assert.False(await GeneratedAuditExistsAsync(tenantId, "2019-Q3"));
     }
+
+    [Fact]
+    public async Task RunAsync_StreamsTheQuarter_WithoutLoadingItAsAList()
+    {
+        var tenantId = await TenantAIdAsync();
+        await AddInvoicesAsync(tenantId, new DateOnly(2017, 11, 1), 3);
+
+        var invoices = await factory.WithDbAsync(async db =>
+        {
+            var invoices = new CapturingInvoiceRepository(new InvoiceRepository(db));
+            await CreateJob(db, invoices).RunAsync(tenantId, 2017, 4, CancellationToken.None);
+            return invoices;
+        });
+
+        Assert.Equal(0, invoices.ListCalls);
+        Assert.Equal(3, invoices.RowsRead);
+        var lines = await File.ReadAllLinesAsync(CsvPath(tenantId, "2017-Q4"));
+        Assert.Equal(5, lines.Length); // Header, 3 rows, total.
+        Assert.Equal("Total,,,6.00", lines[^1]);
+    }
+
+    /// <summary>Adds invoices of 1.00, 2.00, 3.00 … on consecutive days from <paramref name="firstDay"/>.</summary>
+    private Task AddInvoicesAsync(int tenantId, DateOnly firstDay, int count) =>
+        factory.WithDbAsync(async db =>
+        {
+            for (var i = 0; i < count; i++)
+            {
+                db.Invoices.Add(new Domain.Invoice
+                {
+                    TenantId = tenantId,
+                    CustomerName = $"Stream-{firstDay:yyyyMMdd}-{i}",
+                    Amount = i + 1,
+                    IssuedDate = firstDay.AddDays(i),
+                });
+            }
+
+            return await db.SaveChangesAsync();
+        });
 
     /// <summary>
     /// Two runs for the same quarter at once (the schedule and an admin
@@ -204,18 +254,36 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         factory.WithDbAsync(db => db.AuditLogs.AnyAsync(a =>
             a.TenantId == tenantId && a.Action == Domain.AuditActions.GenerateQuarterlyInvoiceReport && a.Detail == quarter));
 
-    /// <summary>Records the token of each call. Can run an action after the query, for example to cancel.</summary>
-    private sealed class CapturingInvoiceRepository(IInvoiceRepository inner, Action? afterQuery = null) : IInvoiceRepository
+    /// <summary>
+    /// Records the token of each streaming call and counts the rows read.
+    /// Can run an action after each row, for example to cancel.
+    /// </summary>
+    private sealed class CapturingInvoiceRepository(IInvoiceRepository inner, Action? afterEachRow = null) : IInvoiceRepository
     {
         public List<CancellationToken> Tokens { get; } = [];
 
-        public async Task<IReadOnlyList<InvoiceSummary>> GetSummariesAsync(
+        public int RowsRead { get; private set; }
+
+        public int ListCalls { get; private set; }
+
+        public Task<IReadOnlyList<InvoiceSummary>> GetSummariesAsync(
             int tenantId, DateOnly fromInclusive, DateOnly toExclusive, CancellationToken cancellationToken)
         {
+            ListCalls++;
+            return inner.GetSummariesAsync(tenantId, fromInclusive, toExclusive, cancellationToken);
+        }
+
+        public async IAsyncEnumerable<InvoiceSummary> StreamSummariesAsync(
+            int tenantId, DateOnly fromInclusive, DateOnly toExclusive,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
             Tokens.Add(cancellationToken);
-            var result = await inner.GetSummariesAsync(tenantId, fromInclusive, toExclusive, cancellationToken);
-            afterQuery?.Invoke();
-            return result;
+            await foreach (var invoice in inner.StreamSummariesAsync(tenantId, fromInclusive, toExclusive, cancellationToken))
+            {
+                RowsRead++;
+                yield return invoice;
+                afterEachRow?.Invoke();
+            }
         }
     }
 

@@ -48,18 +48,13 @@ public sealed class QuarterlyReportJob(
             return QuarterlyReportRunResult.AlreadyGenerated;
         }
 
-        var invoices = await invoiceRepository.GetSummariesAsync(
+        // Streamed: each invoice row goes from the query straight to the file,
+        // so a large quarter is never held in memory. Written before the audit
+        // entry: if the audit save fails, the retry writes the file again
+        // instead of skipping it.
+        var invoices = invoiceRepository.StreamSummariesAsync(
             tenantId, quarter.FirstDay, quarter.FirstDayOfNextQuarter, cancellationToken);
-
-        // Summed in memory, like the monthly report: SQLite (used in tests)
-        // cannot aggregate decimal columns.
-        var count = invoices.Count;
-        var total = invoices.Sum(i => i.Amount);
-
-        // Written before the audit entry: if the audit save fails, the retry
-        // writes the file again instead of skipping it.
-        cancellationToken.ThrowIfCancellationRequested();
-        var path = await csvWriter.WriteAsync(tenantId, quarter, invoices, total, cancellationToken);
+        var report = await csvWriter.WriteAsync(tenantId, quarter, invoices, cancellationToken);
 
         // A unique index allows one entry per tenant and quarter. If another
         // run (the schedule and an admin trigger at once) saved it after the
@@ -84,7 +79,7 @@ public sealed class QuarterlyReportJob(
 
         logger.LogInformation(
             "Generated quarterly report {Quarter} for tenant {TenantId}: {Count} invoices, total {Total}, saved to {Path}",
-            detail, tenantId, count, total, path);
+            detail, tenantId, report.InvoiceCount, report.Total, report.Path);
 
         // Cancelled after the audit save: the next run takes the
         // already-generated branch above and queues the emails then.

@@ -641,8 +641,8 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
             Options.Create(new QuarterlyReportOutputOptions { Directory = _outputDirectory }),
             factory.Services.GetRequiredService<IHostEnvironment>());
 
-    private Task<string> WriteCsvAsync(int tenantId, ReportingQuarter quarter) =>
-        CreateCsvWriter().WriteAsync(tenantId, quarter, [], 0m, CancellationToken.None);
+    private async Task<string> WriteCsvAsync(int tenantId, ReportingQuarter quarter) =>
+        (await CreateCsvWriter().WriteAsync(tenantId, quarter, AsyncEnumerable.Empty<InvoiceSummary>(), CancellationToken.None)).Path;
 
     private static byte[] Unzip(byte[] zip, string expectedEntryName)
     {

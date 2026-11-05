@@ -13,4 +13,16 @@ public interface IInvoiceRepository
         DateOnly fromInclusive,
         DateOnly toExclusive,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The same invoices as <see cref="GetSummariesAsync"/>, in the same order,
+    /// read one row at a time instead of loaded into a list. For large results,
+    /// such as a whole quarter. The query stays open until the caller has read
+    /// every row or stops early.
+    /// </summary>
+    IAsyncEnumerable<InvoiceSummary> StreamSummariesAsync(
+        int tenantId,
+        DateOnly fromInclusive,
+        DateOnly toExclusive,
+        CancellationToken cancellationToken);
 }
