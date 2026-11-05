@@ -15,4 +15,26 @@ public sealed class AuditLogRepository(ReportingDbContext db) : IAuditLogReposit
         db.AuditLogs.Add(entry);
         await db.SaveChangesAsync(cancellationToken);
     }
+
+    public async Task<bool> TryAddUniqueAsync(AuditLog entry, CancellationToken cancellationToken)
+    {
+        db.AuditLogs.Add(entry);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            return true;
+        }
+        catch (DbUpdateException)
+        {
+            // Most likely the unique index. Detach so this context can still
+            // save, then check; anything else is rethrown.
+            db.Entry(entry).State = EntityState.Detached;
+            if (await ExistsAsync(entry.TenantId, entry.Action, entry.Detail ?? "", cancellationToken))
+            {
+                return false;
+            }
+
+            throw;
+        }
+    }
 }

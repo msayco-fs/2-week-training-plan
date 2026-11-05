@@ -3,6 +3,7 @@ using System.Net;
 using System.Security.Claims;
 using System.Threading.RateLimiting;
 using Hangfire;
+using Hangfire.Dashboard;
 using InvoiceReporting.Api.Data;
 using InvoiceReporting.Api.Data.Repositories;
 using InvoiceReporting.Api.Reporting;
@@ -131,7 +132,7 @@ if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 
-    using var scope = app.Services.CreateScope();
+    await using var scope = app.Services.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<ReportingDbContext>();
     await db.Database.MigrateAsync();
     await DevelopmentDataSeeder.SeedAsync(db);
@@ -145,11 +146,18 @@ app.UseAuthentication();
 app.UseRateLimiter();
 app.UseAuthorization();
 
-// Outside Development, Hangfire's default applies: requests from this machine
-// only. Development also allows requests through Docker's port mapping.
-app.UseHangfireDashboard(options: app.Environment.IsDevelopment()
-    ? new DashboardOptions { Authorization = [new DevelopmentDashboardAuthorizationFilter()] }
-    : new DashboardOptions());
+// The dashboard can trigger and delete jobs, so by default it needs both a
+// request from this machine and a PlatformAdmin caller. Only Development may
+// open it to any caller (for Docker's port mapping), and only when
+// Hangfire:Dashboard:AllowAnyCallerInDevelopment is true.
+var allowAnyDashboardCaller = app.Environment.IsDevelopment()
+    && app.Configuration.GetValue<bool>("Hangfire:Dashboard:AllowAnyCallerInDevelopment");
+app.UseHangfireDashboard(options: new DashboardOptions
+{
+    Authorization = allowAnyDashboardCaller
+        ? [new DevelopmentDashboardAuthorizationFilter()]
+        : [new LocalRequestsOnlyAuthorizationFilter(), new PlatformAdminDashboardAuthorizationFilter()],
+});
 
 // Applied to every controller, so new endpoints are limited by default.
 app.MapControllers().RequireRateLimiting(RateLimitPolicies.PerCaller);

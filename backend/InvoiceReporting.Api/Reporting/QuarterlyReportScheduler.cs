@@ -29,9 +29,13 @@ public sealed class QuarterlyReportScheduler(
         var tenantIds = await tenants.GetAllIdsAsync(cancellationToken);
 
         // The quarter is fixed here and passed as arguments, so a retry days
-        // later still reports on the same quarter.
+        // later still reports on the same quarter. CancellationToken.None is a
+        // placeholder: Hangfire passes its shutdown token when each job runs.
         foreach (var tenantId in tenantIds)
         {
+            // Stop queuing on shutdown. The retry queues every tenant again;
+            // a tenant queued twice is skipped by its audit check.
+            cancellationToken.ThrowIfCancellationRequested();
             jobs.Enqueue<QuarterlyReportJob>(job =>
                 job.RunAsync(tenantId, quarter.Year, quarter.Number, CancellationToken.None));
         }

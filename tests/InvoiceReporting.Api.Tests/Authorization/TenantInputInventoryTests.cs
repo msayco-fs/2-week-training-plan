@@ -14,6 +14,7 @@ public sealed class TenantInputInventoryTests
     private static readonly string[] ReviewedActions =
     [
         "InvoiceReportController.GetMonthly",
+        "QuarterlyReportAdminController.TriggerQuarterly",
     ];
 
     private static readonly string[] TenantParameterNames = ["dealer", "dealerid", "tenant", "tenantid", "tenantkey"];

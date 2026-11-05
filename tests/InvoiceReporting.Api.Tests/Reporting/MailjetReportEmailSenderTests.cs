@@ -132,6 +132,36 @@ public sealed class MailjetReportEmailSenderTests
         AssertHasNoSecrets(exception);
     }
 
+    /// <summary>
+    /// A stopped job is not a failed send: it surfaces as a cancellation, so
+    /// the email job records nothing. A timeout (above) stays OutcomeUnknown.
+    /// </summary>
+    [Fact]
+    public async Task SendAsync_WhenTheJobIsCancelledMidRequest_ThrowsOperationCanceled_NotOutcomeUnknown()
+    {
+        _handler.Hang();
+        using var cts = new CancellationTokenSource();
+
+        var send = CreateSender().SendAsync(CreateEmail(), cts.Token);
+        await cts.CancelAsync();
+
+        // ReportEmailOutcomeUnknownException is not an OperationCanceledException,
+        // so this also proves the cancellation was not wrapped.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send);
+    }
+
+    [Fact]
+    public async Task FindPriorSendAsync_WhenTheJobIsCancelled_ThrowsOperationCanceled()
+    {
+        _handler.Hang();
+        using var cts = new CancellationTokenSource();
+
+        var lookup = CreateSender().FindPriorSendAsync("quarterly-report.2026-Q3.t1.u2", cts.Token);
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => lookup);
+    }
+
     [Theory]
     [InlineData(1, PriorSendStatus.Sent)]
     [InlineData(0, PriorSendStatus.NotFound)]

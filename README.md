@@ -284,6 +284,90 @@ authenticated), `403` (not allowed to access that tenant, empty body), `404`
 exceeded; `RateLimiting:PerCaller` defaults to 60 requests per minute per
 subject).
 
+#### Run a quarterly report now (administrators)
+
+`POST /api/admin/quarterly-reports/{year}/{quarter}`
+
+Builds one tenant's quarterly CSV inside the request, then queues its emails
+in Hangfire. A quarter that was already reported is not built again; only its
+emails are queued again (people who already got the email are skipped).
+
+| Input | Where | Rules |
+| --- | --- | --- |
+| `year`, `quarter` | path | Year 2000–2100, quarter 1–4. |
+| `X-Dealer-Id` | header | Required. Tenant key, same rules as above. |
+| `Authorization` | header | Required. `Bearer <JWT>` with the `PlatformAdmin` role. |
+
+Two checks, both required: the `PlatformAdmin` role (`[Authorize(Roles = ...)]`),
+then the same `TenantAccess` policy as the monthly report. A standard user
+gets `403`, even for their own tenant. Each call is audited as
+`TriggerQuarterlyInvoiceReport` with the caller's subject.
+
+`200 OK`: `{ "tenantKey": "dealer-alpha", "quarter": "2026-Q3", "result": "Generated" }`
+(`result` is `Generated` or `AlreadyGenerated`).
+
+Errors: `400` (bad year, quarter or tenant header), `401`, `403`, `404`
+(unknown tenant), `429`. If the caller disconnects, the run is cancelled: the
+request's token reaches every database query and the file write, and no CSV,
+"generated" audit entry or email job is recorded.
+
+**Long runs.** The CSV is built inside the request, so the call takes as long
+as the quarter's query and file write. A reverse proxy or client timeout
+shorter than that (many proxies default to 60 to 120 seconds) closes the
+connection and cancels the run, as above. Nothing is half-recorded: call the
+endpoint again, or let the scheduled job run it. For very large tenants,
+raise the proxy timeout for `/api/admin/quarterly-reports`. For the quarter
+that just ended, the Hangfire dashboard's **Trigger now** is another option:
+it queues every tenant as background jobs, with no request timeout. A queued
+mode for this endpoint that returns `202 Accepted` is not provided.
+
+The Hangfire dashboard's **Trigger now** is a second way to run the job. It
+needs a `PlatformAdmin` caller too (no per-tenant check: the dashboard covers
+every tenant); see the dashboard note under
+[Quarterly report emails](#quarterly-report-emails).
+
+#### Async and cancellation: what stays synchronous
+
+The report pipeline is async from end to end. The caller's token (the
+request-aborted token over HTTP, Hangfire's shutdown token in a job) reaches
+every database query, the CSV write, the zip, the provider lookup and the
+send. The invoices are streamed (`IAsyncEnumerable<InvoiceSummary>` read with
+`await foreach`): each row goes from the query straight to the CSV file, so a
+large quarter is never held in memory. The database query stays open while
+the file is written.
+
+`NoBlockingCallsTests` fails the build on `.Result`, `.Wait()`,
+`GetAwaiter().GetResult()`, `Task.Run` or `async void` in `backend/`.
+
+A few calls stay synchronous on purpose. .NET has no async version of them,
+and wrapping them in `Task.Run` would only move the wait to another thread.
+Each one is a single metadata operation on the local disk, not a data
+transfer:
+
+| Call | Where | Why it is acceptable |
+| --- | --- | --- |
+| `Directory.CreateDirectory` | `QuarterlyReportCsvWriter`, `FailedReportEmailLogFile` | Returns at once when the folder exists, which is every run after the first. |
+| `File.Move(temp, path, overwrite: true)` | `QuarterlyReportCsvWriter` | A rename on the same volume. It is what makes the report replace atomic. |
+| `File.Delete` | `QuarterlyReportCsvWriter` (temp cleanup), `FailedReportEmailLogFile` (retention) | Cleanup only. Failures are ignored and retried on the next run or day. |
+| `File.Exists` | `QuarterlyReportEmailJob` | Checks the CSV is there before claiming the email. |
+| `File.GetLastWriteTime` | `QuarterlyReportZip` | Sets the zip entry's date. |
+| `new FileInfo(path).Length` | `QuarterlyReportEmailJob` | Only in the "too large" log message. |
+| `File.WriteAllText` probe | `FailedReportEmailLogFile.CheckDirectory` | Runs once at startup, before any request or job. |
+| `IBackgroundJobClient.Enqueue` | Scheduler, report job, email job | Hangfire's API is synchronous. It writes one job row to Hangfire's storage. |
+
+The `CancellationToken.None` uses in `backend/` are also intentional:
+
+- **Hangfire placeholders** in `Enqueue(...)` and the recurring job: Hangfire
+  replaces them with its shutdown token when the job runs.
+- **Releasing an email claim** after a failure or a cancel: the cleanup must
+  run even when the job's token is already cancelled.
+- **Marking an email sent**: the email is already out, so the record must be
+  saved.
+- **Failure audit writes** (and their duplicate check): a failure must be
+  recorded even while the job is stopping.
+- **SMTP `DisconnectAsync` after the server accepted the email**: a failed
+  QUIT must not undo a send.
+
 ### Quarterly report emails
 
 After `QuarterlyReportJob` writes a tenant's CSV, `QuarterlyReportEmailJob`
@@ -323,9 +407,18 @@ To check the emails by hand:
    `quarterly-report.<quarter>.t<tenant>.u<user>@...`.
 4. Trigger the job again. No new emails should arrive.
 
-In Development the Hangfire dashboard accepts any caller, so it works through
-Docker's port mapping. Compose publishes the port on `127.0.0.1` only. In
-every other environment the dashboard accepts local requests only.
+The dashboard can trigger and delete jobs for every tenant. By default it
+needs both a request from the same machine and an authenticated caller with
+the `PlatformAdmin` role (`401` without a token, `403` otherwise). The caller
+is authenticated with the app's JWT bearer scheme, so a browser must send the
+`Authorization` header (for example through a header-injecting extension or
+an authenticating reverse proxy).
+
+In Development, `appsettings.Development.json` sets
+`Hangfire:Dashboard:AllowAnyCallerInDevelopment` to `true`, so the dashboard
+accepts any caller and works through Docker's port mapping. Compose publishes
+the port on `127.0.0.1` only. Set it to `false` to test the admin check
+locally. The setting is ignored outside Development.
 
 #### Settings
 
@@ -380,6 +473,7 @@ How failures are handled:
 | No answer from Mailjet (the email may have gone out) | The claim is kept. After 5 minutes a retry asks Mailjet whether the email was sent, and sends only if it was not |
 | The CSV is missing | Retried, in case the report job is still writing it. The last retry is recorded as failed (`retries-exhausted:csv-missing`) |
 | Another job is still sending the same email | Retried later. The last retry is recorded as failed (`retries-exhausted:in-progress`) |
+| The job is stopped (server shutdown) | Not a failure: nothing is audited or logged as failed, and Hangfire runs the job again. Stopped before sending, the claim is freed. Stopped mid-send, the claim is kept, as for no answer above |
 
 #### Sending domain: SPF, DKIM and DMARC
 

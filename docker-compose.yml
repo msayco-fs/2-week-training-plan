@@ -15,7 +15,8 @@ services:
       context: .
       dockerfile: backend/InvoiceReporting.Api/Dockerfile
     ports:
-      # 127.0.0.1 only: in Development the Hangfire dashboard is open to any
+      # 127.0.0.1 only: in Development (with AllowAnyCallerInDevelopment, set in
+      # appsettings.Development.json) the Hangfire dashboard is open to any
       # caller that can reach this port.
       - "127.0.0.1:5080:8080"
     environment:

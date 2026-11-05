@@ -335,6 +335,9 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
 
         public Task AddAsync(AuditLog entry, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Database unavailable.");
+
+        public Task<bool> TryAddUniqueAsync(AuditLog entry, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Database unavailable.");
     }
 
     /// <summary>
@@ -449,6 +452,135 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
             await AuditDetailsAsync(AuditActions.EmailQuarterlyInvoiceReportAttemptFailed, tenantId, "2021-Q3"));
     }
 
+    [Fact]
+    public async Task QueueRecipientsAsync_WhenCancelled_Throws_AndQueuesNothing()
+    {
+        var tenantId = await factory.WithDbAsync(TenantIdAsync);
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            RunAsync(job => job.QueueRecipientsAsync(tenantId, 2019, 1, cts.Token)));
+
+        Assert.Empty(_jobs.Created);
+    }
+
+    [Fact]
+    public async Task SendAsync_WhenCancelledDuringTheProviderLookup_KeepsTheClaim_AndRecordsNoFailure()
+    {
+        var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
+        await WriteCsvAsync(tenantId, new ReportingQuarter(2019, 1));
+        await InsertClaimAsync(tenantId, userId, "2019-Q1", claimedAgo: QuarterlyReportEmailJob.ClaimLease + TimeSpan.FromMinutes(1));
+        using var cts = new CancellationTokenSource();
+        _sender.OnLookup = cts.Cancel;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            RunAsync(job => job.SendAsync(tenantId, userId, 2019, 1, null, cts.Token)));
+
+        Assert.Empty(_sender.Sent);
+        Assert.Equal(EmailDeliveryStatus.Sending, (await DeliveryAsync(tenantId, userId, "2019-Q1")).Status);
+        await AssertNoFailureRecordedAsync(tenantId, "2019-Q1");
+    }
+
+    [Fact]
+    public async Task SendAsync_WhenCancelledBeforeZipping_ReleasesTheClaim_AndRecordsNoFailure()
+    {
+        var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
+        await WriteCsvAsync(tenantId, new ReportingQuarter(2019, 2));
+        using var cts = new CancellationTokenSource();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            RunAsync(job => job.SendAsync(tenantId, userId, 2019, 2, null, cts.Token), cancelAfterClaim: cts));
+
+        Assert.Empty(_sender.Sent);
+        Assert.Null(await FindDeliveryAsync(tenantId, userId, "2019-Q2"));
+        await AssertNoFailureRecordedAsync(tenantId, "2019-Q2");
+    }
+
+    /// <summary>
+    /// The last retry is where a failure becomes "retries-exhausted". A
+    /// cancellation there must not be recorded as a failed email.
+    /// </summary>
+    [Fact]
+    public async Task SendAsync_WhenCancelledMidSendOnTheLastRetry_KeepsTheClaim_AndRecordsNoFailure()
+    {
+        var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
+        await WriteCsvAsync(tenantId, new ReportingQuarter(2019, 3));
+        var context = HangfireTestContext.Create(retryCount: QuarterlyReportEmailJob.MaxRetries);
+        using var cts = new CancellationTokenSource();
+        _sender.OnSend = cts.Cancel;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            RunAsync(job => job.SendAsync(tenantId, userId, 2019, 3, context, cts.Token)));
+
+        Assert.Empty(_sender.Sent);
+        // Kept: the email may be out, so a later run asks the provider first.
+        Assert.Equal(EmailDeliveryStatus.Sending, (await DeliveryAsync(tenantId, userId, "2019-Q3")).Status);
+        await AssertNoFailureRecordedAsync(tenantId, "2019-Q3");
+        Assert.Empty(await AuditDetailsAsync(AuditActions.EmailQuarterlyInvoiceReport, tenantId, "2019-Q3"));
+    }
+
+    /// <summary>
+    /// The tenant name is read just before sending. A cancel there means
+    /// nothing was sent, so the claim is freed and a retry can send at once.
+    /// </summary>
+    [Fact]
+    public async Task SendAsync_WhenCancelledWhileReadingTheTenantName_ReleasesTheClaim_AndRecordsNoFailure()
+    {
+        var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
+        await WriteCsvAsync(tenantId, new ReportingQuarter(2017, 1));
+        using var cts = new CancellationTokenSource();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            RunAsync(job => job.SendAsync(tenantId, userId, 2017, 1, null, cts.Token), cancelOnTenantName: cts));
+
+        Assert.Empty(_sender.Sent);
+        Assert.Null(await FindDeliveryAsync(tenantId, userId, "2017-Q1"));
+        await AssertNoFailureRecordedAsync(tenantId, "2017-Q1");
+    }
+
+    /// <summary>Cancels the job's token when the tenant name is read, then reads it with that token.</summary>
+    private sealed class CancelOnTenantNameRepository(ITenantRepository inner, CancellationTokenSource cts) : ITenantRepository
+    {
+        public Task<Api.Tenancy.ResolvedTenant?> FindByKeyAsync(string normalizedKey, CancellationToken cancellationToken) =>
+            inner.FindByKeyAsync(normalizedKey, cancellationToken);
+
+        public Task<IReadOnlyList<int>> GetAllIdsAsync(CancellationToken cancellationToken) =>
+            inner.GetAllIdsAsync(cancellationToken);
+
+        public async Task<string?> GetDisplayNameAsync(int tenantId, CancellationToken cancellationToken)
+        {
+            await cts.CancelAsync();
+            return await inner.GetDisplayNameAsync(tenantId, cancellationToken);
+        }
+    }
+
+    private async Task AssertNoFailureRecordedAsync(int tenantId, string quarter)
+    {
+        Assert.Empty(await AuditDetailsAsync(AuditActions.EmailQuarterlyInvoiceReportAttemptFailed, tenantId, quarter));
+        Assert.Empty(await FailedAuditDetailsAsync(tenantId, quarter));
+        Assert.Empty(_failedLog.Logger.Entries);
+    }
+
+    /// <summary>Cancels the job's token right after it claims the email, before zipping.</summary>
+    private sealed class CancelAfterClaimRepository(IEmailDeliveryRepository inner, CancellationTokenSource cts)
+        : IEmailDeliveryRepository
+    {
+        public async Task<EmailDeliveryClaim> TryClaimAsync(
+            int tenantId, int userId, string quarter, DateTime nowUtc, TimeSpan lease, CancellationToken cancellationToken)
+        {
+            var claim = await inner.TryClaimAsync(tenantId, userId, quarter, nowUtc, lease, cancellationToken);
+            await cts.CancelAsync();
+            return claim;
+        }
+
+        public Task MarkSentAsync(EmailDeliveryClaim claim, DateTime nowUtc, AuditLog audit, CancellationToken cancellationToken) =>
+            inner.MarkSentAsync(claim, nowUtc, audit, cancellationToken);
+
+        public Task ReleaseAsync(EmailDeliveryClaim claim, CancellationToken cancellationToken) =>
+            inner.ReleaseAsync(claim, cancellationToken);
+    }
+
     private Task<QuarterlyReportEmailDelivery> DeliveryAsync(int tenantId, int userId, string quarter) =>
         factory.WithDbAsync(db => db.QuarterlyReportEmailDeliveries.AsNoTracking()
             .SingleAsync(d => d.TenantId == tenantId && d.UserId == userId && d.Quarter == quarter));
@@ -471,10 +603,12 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
     private Task RunAsync(
         Func<QuarterlyReportEmailJob, Task> action,
         bool enabled = true,
-        long maxAttachmentBytes = QuarterlyReportEmailOptions.MaxAllowedAttachmentBytes) =>
+        long maxAttachmentBytes = QuarterlyReportEmailOptions.MaxAllowedAttachmentBytes,
+        CancellationTokenSource? cancelAfterClaim = null,
+        CancellationTokenSource? cancelOnTenantName = null) =>
         factory.WithDbAsync(async db =>
         {
-            await action(CreateJob(db, enabled, maxAttachmentBytes));
+            await action(CreateJob(db, enabled, maxAttachmentBytes, cancelAfterClaim: cancelAfterClaim, cancelOnTenantName: cancelOnTenantName));
             return 0;
         });
 
@@ -482,11 +616,17 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
         ReportingDbContext db,
         bool enabled,
         long maxAttachmentBytes = QuarterlyReportEmailOptions.MaxAllowedAttachmentBytes,
-        IAuditLogRepository? audits = null) =>
+        IAuditLogRepository? audits = null,
+        CancellationTokenSource? cancelAfterClaim = null,
+        CancellationTokenSource? cancelOnTenantName = null) =>
         new(
             new ReportRecipientRepository(db),
-            new TenantRepository(db),
-            new EmailDeliveryRepository(db),
+            cancelOnTenantName is null
+                ? new TenantRepository(db)
+                : new CancelOnTenantNameRepository(new TenantRepository(db), cancelOnTenantName),
+            cancelAfterClaim is null
+                ? new EmailDeliveryRepository(db)
+                : new CancelAfterClaimRepository(new EmailDeliveryRepository(db), cancelAfterClaim),
             audits ?? new AuditLogRepository(db),
             _sender,
             CreateCsvWriter(),
@@ -501,8 +641,8 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
             Options.Create(new QuarterlyReportOutputOptions { Directory = _outputDirectory }),
             factory.Services.GetRequiredService<IHostEnvironment>());
 
-    private Task<string> WriteCsvAsync(int tenantId, ReportingQuarter quarter) =>
-        CreateCsvWriter().WriteAsync(tenantId, quarter, [], 0m, CancellationToken.None);
+    private async Task<string> WriteCsvAsync(int tenantId, ReportingQuarter quarter) =>
+        (await CreateCsvWriter().WriteAsync(tenantId, quarter, AsyncEnumerable.Empty<InvoiceSummary>(), CancellationToken.None)).Path;
 
     private static byte[] Unzip(byte[] zip, string expectedEntryName)
     {

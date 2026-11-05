@@ -72,8 +72,13 @@ public sealed class QuarterlyReportEmailJob(
         var userIds = await recipients.GetRecipientUserIdsAsync(tenantId, cancellationToken);
 
         // Only ids go into job arguments, so no email addresses are stored in Hangfire.
+        // CancellationToken.None is a placeholder: Hangfire passes its shutdown
+        // token when each job runs.
         foreach (var userId in userIds)
         {
+            // Stop queuing on shutdown. The retry queues everyone again, and
+            // each send job skips people who already received the report.
+            cancellationToken.ThrowIfCancellationRequested();
             jobs.Enqueue<QuarterlyReportEmailJob>(job =>
                 job.SendAsync(tenantId, userId, year, quarterNumber, null, CancellationToken.None));
         }
@@ -145,6 +150,12 @@ public sealed class QuarterlyReportEmailJob(
             {
                 prior = await sender.FindPriorSendAsync(idempotencyKey, cancellationToken);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // The job was stopped, not failed. Keep the claim for the same
+                // reason as below, record nothing, and let Hangfire requeue it.
+                throw;
+            }
             catch (Exception ex)
             {
                 // Keep the claim. Releasing it would drop the takeover, and the
@@ -172,11 +183,23 @@ public sealed class QuarterlyReportEmailJob(
         // sent returns above instead of being recorded as too large. Zipping
         // stops at the limit, so a huge CSV is never held in memory. A retry
         // cannot make the zip smaller, so this frees the claim and returns
-        // instead of throwing.
+        // instead of throwing. The tenant name is read here too, before the
+        // send: a cancel or error while reading it means nothing was sent,
+        // so the claim is freed rather than kept as if mid-send.
         byte[]? zip;
+        string tenantName;
         try
         {
             zip = await QuarterlyReportZip.CreateAsync(path, options.Value.MaxAttachmentBytes, cancellationToken);
+            tenantName = await tenants.GetDisplayNameAsync(tenantId, cancellationToken) ?? $"Tenant {tenantId}";
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Stopped before sending. Free the claim (with None: this cleanup
+            // must run although the job's token is cancelled), record nothing
+            // as failed, and let Hangfire requeue the job.
+            await deliveries.ReleaseAsync(claim, CancellationToken.None);
+            throw;
         }
         catch (Exception ex)
         {
@@ -199,8 +222,6 @@ public sealed class QuarterlyReportEmailJob(
 
         try
         {
-            var tenantName = await tenants.GetDisplayNameAsync(tenantId, cancellationToken) ?? $"Tenant {tenantId}";
-
             await sender.SendAsync(new ReportEmail(
                 idempotencyKey,
                 toAddress,
@@ -230,6 +251,14 @@ public sealed class QuarterlyReportEmailJob(
             await RecordAttemptFailedAsync(tenantId, userId, quarter, ReportEmailFailureReasons.OutcomeUnknown, retryCount, jobId, ex);
             throw;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Stopped mid-send (for example SMTP during DATA): the email may be
+            // out. Keep the claim, like an unknown outcome, so a later run asks
+            // the provider before sending again. Not a failure, so nothing is
+            // recorded; Hangfire requeues the job.
+            throw;
+        }
         catch (Exception ex)
         {
             // Not sent, so free the claim and let the retry try again.
@@ -240,8 +269,10 @@ public sealed class QuarterlyReportEmailJob(
 
         // If this save fails, the claim stays in the Sending state. Retries see
         // InProgress until the lease expires, then take over and ask the
-        // provider before sending again.
-        await MarkSentAsync(claim, tenantId, userId, quarter, cancellationToken);
+        // provider before sending again. Saved with None, not the job's token:
+        // the email is already out, so a shutdown now must not skip recording
+        // it (SMTP cannot be asked later and would send it a second time).
+        await MarkSentAsync(claim, tenantId, userId, quarter, CancellationToken.None);
 
         // The address is not logged; the user id is enough to trace it.
         logger.LogInformation("Emailed report {Quarter} for tenant {TenantId} to user {UserId}", quarter, tenantId, userId);

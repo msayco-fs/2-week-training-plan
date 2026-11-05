@@ -53,6 +53,11 @@ namespace InvoiceReporting.Api.Data.Migrations
 
                     b.HasIndex("TenantId");
 
+                    b.HasIndex("TenantId", "Action", "Detail")
+                        .IsUnique()
+                        .HasDatabaseName("IX_AuditLogs_QuarterlyReportGenerated")
+                        .HasFilter("[Action] = 'GenerateQuarterlyInvoiceReport'");
+
                     b.ToTable("AuditLogs");
                 });
 

@@ -52,7 +52,7 @@ public sealed class QuarterlyReportEmailConcurrencyTests : IDisposable
     public async Task ManyJobsForTheSameEmailAtOnce_SendExactlyOneEmail()
     {
         var (tenantId, userId) = await TenantAAndUserAsync();
-        await CreateCsvWriter().WriteAsync(tenantId, new ReportingQuarter(2026, 3), [], 0m, CancellationToken.None);
+        await CreateCsvWriter().WriteAsync(tenantId, new ReportingQuarter(2026, 3), AsyncEnumerable.Empty<InvoiceSummary>(), CancellationToken.None);
 
         // A slow send keeps the winner's claim in the Sending state while the
         // other jobs try to claim it.

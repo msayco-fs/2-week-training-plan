@@ -53,6 +53,19 @@ public sealed class ReportingDbContext(DbContextOptions<ReportingDbContext> opti
             audit.Property(a => a.Action).HasMaxLength(64);
             audit.Property(a => a.Detail).HasMaxLength(64);
             audit.Property(a => a.ActorSubject).HasMaxLength(128);
+
+            // At most one "generated" entry per tenant and quarter, so two
+            // report runs at once cannot both record the quarter. Other
+            // actions may repeat. Plain quotes, not N'', so SQLite (tests)
+            // accepts the same filter as SQL Server.
+            audit.HasIndex(a => new { a.TenantId, a.Action, a.Detail })
+                .IsUnique()
+                .HasFilter($"[Action] = '{AuditActions.GenerateQuarterlyInvoiceReport}'")
+                .HasDatabaseName("IX_AuditLogs_QuarterlyReportGenerated");
+
+            // Kept on purpose: the index above is filtered, so it cannot serve
+            // the tenant foreign key, but EF would otherwise drop this one.
+            audit.HasIndex(a => a.TenantId);
             audit.HasOne(a => a.Tenant)
                 .WithMany()
                 .HasForeignKey(a => a.TenantId)

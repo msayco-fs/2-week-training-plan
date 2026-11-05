@@ -70,10 +70,16 @@ public sealed partial class MailjetReportEmailSender(
             // The connection broke after the request went out.
             throw new ReportEmailOutcomeUnknownException(ex);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // The job was stopped mid-request. Rethrown as a cancellation, not
+            // a failure: the caller keeps its claim (Mailjet may have the
+            // email) and records nothing, and Hangfire requeues the job.
+            throw;
+        }
         catch (OperationCanceledException ex)
         {
-            // HttpClient timeout, or the job was stopped mid-request. Either
-            // way Mailjet may already have accepted the email.
+            // HttpClient timeout: Mailjet may already have accepted the email.
             throw new ReportEmailOutcomeUnknownException(ex);
         }
 
