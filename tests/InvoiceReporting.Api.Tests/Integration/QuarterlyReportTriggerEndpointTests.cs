@@ -1,7 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
-using System.Runtime.CompilerServices;
 using Hangfire;
+using Hangfire.States;
 using InvoiceReporting.Api.Controllers;
 using InvoiceReporting.Api.Data.Repositories;
 using InvoiceReporting.Api.Domain;
@@ -90,41 +90,110 @@ public sealed class QuarterlyReportTriggerEndpointTests : IClassFixture<InvoiceR
     }
 
     [Fact]
-    public async Task Trigger_ByPlatformAdmin_BuildsTheReport_QueuesEmails_AndAuditsTheCaller()
+    public async Task Trigger_ByPlatformAdmin_Returns202_QueuesTheReportJob_AndAuditsTheCaller()
     {
         using var client = _app.CreateClient();
         var subject = HttpRequestBuilder.NewSubject();
 
         var response = await client.SendAsync(Trigger(2018, 2, TestData.TenantAKey, subject, roles: AppRoles.PlatformAdmin));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var body = await response.Content.ReadFromJsonAsync<QuarterlyReportTriggerResponse>();
-        Assert.Equal(new QuarterlyReportTriggerResponse(TestData.TenantAKey, "2018-Q2", QuarterlyReportRunResult.Generated), body);
+        Assert.NotNull(body);
+        Assert.Equal(new QuarterlyReportTriggerResponse(TestData.TenantAKey, "2018-Q2", body.JobId), body);
+        Assert.Equal($"/api/admin/quarterly-reports/runs/{body.JobId}", response.Headers.Location?.AbsolutePath);
 
         var tenantId = await TenantIdAsync(TestData.TenantAKey);
-        Assert.True(File.Exists(Path.Combine(_outputDirectory, $"2018-Q2-tenant-{tenantId}.csv")));
         var queued = Assert.Single(_jobs.Created);
-        Assert.Equal(nameof(QuarterlyReportEmailJob.QueueRecipientsAsync), queued.Method.Name);
+        Assert.Equal(typeof(QuarterlyReportJob), queued.Type);
+        Assert.Equal(nameof(QuarterlyReportJob.RunAsync), queued.Method.Name);
+        Assert.Equal([tenantId, 2018, 2], queued.Args.Take(3));
+
+        // Queued, not run: nothing is built during the request.
+        Assert.False(File.Exists(Path.Combine(_outputDirectory, $"2018-Q2-tenant-{tenantId}.csv")));
+        Assert.False(await GeneratedAuditExistsAsync(tenantId, "2018-Q2"));
 
         var trigger = Assert.Single(await AuditsBySubjectAsync(subject));
         Assert.Equal(AuditActions.TriggerQuarterlyInvoiceReport, trigger.Action);
         Assert.Equal(tenantId, trigger.TenantId);
         Assert.Equal("2018-Q2", trigger.Detail);
-        Assert.True(await GeneratedAuditExistsAsync(tenantId, "2018-Q2"));
     }
 
     [Fact]
-    public async Task Trigger_ByPlatformAdmin_ForAQuarterAlreadyReported_ReturnsAlreadyGenerated()
+    public async Task GetRun_ForASucceededRun_ReturnsTheStateAndResult()
     {
+        var tenantId = await TenantIdAsync(TestData.TenantAKey);
+        var jobId = AddReportJob(tenantId, new SucceededState(QuarterlyReportRunResult.Generated, 1, 1));
         using var client = _app.CreateClient();
 
-        var first = await client.SendAsync(Trigger(2018, 3, TestData.TenantBKey, HttpRequestBuilder.NewSubject(), roles: AppRoles.PlatformAdmin));
-        var second = await client.SendAsync(Trigger(2018, 3, TestData.TenantBKey, HttpRequestBuilder.NewSubject(), roles: AppRoles.PlatformAdmin));
+        var response = await client.SendAsync(GetRun(jobId, TestData.TenantAKey, roles: AppRoles.PlatformAdmin));
 
-        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
-        var body = await second.Content.ReadFromJsonAsync<QuarterlyReportTriggerResponse>();
-        Assert.Equal(QuarterlyReportRunResult.AlreadyGenerated, body!.Result);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(
+            new QuarterlyReportRunStatusResponse(jobId, TestData.TenantAKey, "2017-Q4", SucceededState.StateName, QuarterlyReportRunResult.Generated),
+            await response.Content.ReadFromJsonAsync<QuarterlyReportRunStatusResponse>());
+    }
+
+    /// <summary>
+    /// A failed run waits in the Scheduled state for its next retry (Hangfire's
+    /// retry filter turns Failed into Scheduled until the retries run out).
+    /// Scheduled a day ahead, so the test server never runs it.
+    /// </summary>
+    [Fact]
+    public async Task GetRun_ForARunWaitingForARetry_ReturnsScheduled_WithNoResult()
+    {
+        var tenantId = await TenantIdAsync(TestData.TenantAKey);
+        var jobId = AddReportJob(tenantId, new ScheduledState(TimeSpan.FromDays(1)));
+        using var client = _app.CreateClient();
+
+        var response = await client.SendAsync(GetRun(jobId, TestData.TenantAKey, roles: AppRoles.PlatformAdmin));
+
+        var body = await response.Content.ReadFromJsonAsync<QuarterlyReportRunStatusResponse>();
+        Assert.Equal(ScheduledState.StateName, body?.State);
+        Assert.Null(body?.Result);
+    }
+
+    /// <summary>A job id must not reveal another tenant's run.</summary>
+    [Fact]
+    public async Task GetRun_ForAnotherTenantsRun_Returns404()
+    {
+        var tenantBId = await TenantIdAsync(TestData.TenantBKey);
+        var jobId = AddReportJob(tenantBId, new SucceededState(QuarterlyReportRunResult.Generated, 1, 1));
+        using var client = _app.CreateClient();
+
+        var response = await client.SendAsync(GetRun(jobId, TestData.TenantAKey, roles: AppRoles.PlatformAdmin));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    /// <summary>A job id must not reveal other kinds of jobs, such as email jobs.</summary>
+    [Fact]
+    public async Task GetRun_ForAJobThatIsNotAReportRun_OrAnUnknownId_Returns404()
+    {
+        var tenantId = await TenantIdAsync(TestData.TenantAKey);
+        var emailJob = new BackgroundJobClient(_app.Services.GetRequiredService<JobStorage>()).Create<QuarterlyReportEmailJob>(
+            job => job.QueueRecipientsAsync(tenantId, 2017, 4, CancellationToken.None),
+            new SucceededState(null, 1, 1));
+        using var client = _app.CreateClient();
+
+        var notAReport = await client.SendAsync(GetRun(emailJob, TestData.TenantAKey, roles: AppRoles.PlatformAdmin));
+        var unknown = await client.SendAsync(GetRun("999999", TestData.TenantAKey, roles: AppRoles.PlatformAdmin));
+
+        Assert.Equal(HttpStatusCode.NotFound, notAReport.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetRun_ByANonAdmin_Returns403()
+    {
+        var tenantId = await TenantIdAsync(TestData.TenantAKey);
+        var jobId = AddReportJob(tenantId, new SucceededState(QuarterlyReportRunResult.Generated, 1, 1));
+        using var client = _app.CreateClient();
+
+        // Standard user of the run's own tenant: TenantAccess alone would allow this.
+        var response = await client.SendAsync(GetRun(jobId, TestData.TenantAKey, tenantClaim: TestData.TenantAKey));
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
     [Fact]
@@ -154,39 +223,6 @@ public sealed class QuarterlyReportTriggerEndpointTests : IClassFixture<InvoiceR
         Assert.Empty(_jobs.Created);
     }
 
-    /// <summary>
-    /// The client gives up mid-run. The request-aborted token must reach the
-    /// repository inside the job, and the job must stop without writing the
-    /// CSV, the "generated" audit entry or the email jobs.
-    /// </summary>
-    [Fact]
-    public async Task Trigger_WhenTheClientCancels_CancelsTheRunningJob_AndRecordsNoReport()
-    {
-        var invoices = new BlockingInvoiceRepository();
-        using var app = _app.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
-        {
-            services.RemoveAll<IInvoiceRepository>();
-            services.AddSingleton<IInvoiceRepository>(invoices);
-        }));
-        using var client = app.CreateClient();
-        var subject = HttpRequestBuilder.NewSubject();
-        using var cts = new CancellationTokenSource();
-
-        var call = client.SendAsync(Trigger(2018, 4, TestData.TenantAKey, subject, roles: AppRoles.PlatformAdmin), cts.Token);
-        await invoices.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        await cts.CancelAsync();
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => call);
-        Assert.True(await invoices.SawCancellation.Task.WaitAsync(TimeSpan.FromSeconds(10)));
-
-        var tenantId = await TenantIdAsync(TestData.TenantAKey);
-        Assert.False(File.Exists(Path.Combine(_outputDirectory, $"2018-Q4-tenant-{tenantId}.csv")));
-        Assert.False(await GeneratedAuditExistsAsync(tenantId, "2018-Q4"));
-        Assert.Empty(_jobs.Created);
-        // The trigger itself is still traceable to the administrator.
-        Assert.Equal(AuditActions.TriggerQuarterlyInvoiceReport, Assert.Single(await AuditsBySubjectAsync(subject)).Action);
-    }
-
     private static HttpRequestMessage Trigger(
         int year, int quarter, string? tenantKey, string? subject, string? tenantClaim = null, params string[] roles)
     {
@@ -213,6 +249,32 @@ public sealed class QuarterlyReportTriggerEndpointTests : IClassFixture<InvoiceR
         return request;
     }
 
+    private static HttpRequestMessage GetRun(string jobId, string tenantKey, string? tenantClaim = null, params string[] roles)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/admin/quarterly-reports/runs/{jobId}");
+        request.Headers.Add(TenantResolver.TenantHeaderName, tenantKey);
+        request.Headers.Add(TestAuthHandler.SubjectHeader, HttpRequestBuilder.NewSubject());
+        if (tenantClaim is not null)
+        {
+            request.Headers.Add(TestAuthHandler.TenantHeader, tenantClaim);
+        }
+
+        if (roles.Length > 0)
+        {
+            request.Headers.Add(TestAuthHandler.RolesHeader, string.Join(',', roles));
+        }
+
+        return request;
+    }
+
+    /// <summary>
+    /// Adds a 2017-Q4 report run straight into the app's Hangfire storage, in a
+    /// state the test server never picks up and runs (final, or scheduled far ahead).
+    /// </summary>
+    private string AddReportJob(int tenantId, IState state) =>
+        new BackgroundJobClient(_app.Services.GetRequiredService<JobStorage>()).Create<QuarterlyReportJob>(
+            job => job.RunAsync(tenantId, 2017, 4, CancellationToken.None), state);
+
     private Task<int> TenantIdAsync(string key) =>
         _factory.WithDbAsync(db => db.Tenants.Where(t => t.Key == key).Select(t => t.Id).SingleAsync());
 
@@ -222,37 +284,6 @@ public sealed class QuarterlyReportTriggerEndpointTests : IClassFixture<InvoiceR
     private Task<bool> GeneratedAuditExistsAsync(int tenantId, string quarter) =>
         _factory.WithDbAsync(db => db.AuditLogs.AnyAsync(a =>
             a.TenantId == tenantId && a.Action == AuditActions.GenerateQuarterlyInvoiceReport && a.Detail == quarter));
-
-    /// <summary>Waits on the invoice stream until its token is cancelled, and reports that it was.</summary>
-    private sealed class BlockingInvoiceRepository : IInvoiceRepository
-    {
-        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public TaskCompletionSource<bool> SawCancellation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        // The quarterly job streams; only the monthly report uses the list.
-        public Task<IReadOnlyList<InvoiceSummary>> GetSummariesAsync(
-            int tenantId, DateOnly fromInclusive, DateOnly toExclusive, CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
-
-        public async IAsyncEnumerable<InvoiceSummary> StreamSummariesAsync(
-            int tenantId, DateOnly fromInclusive, DateOnly toExclusive,
-            [EnumeratorCancellation] CancellationToken cancellationToken)
-        {
-            Started.TrySetResult();
-            try
-            {
-                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                SawCancellation.TrySetResult(true);
-                throw;
-            }
-
-            yield break;
-        }
-    }
 
     public void Dispose()
     {

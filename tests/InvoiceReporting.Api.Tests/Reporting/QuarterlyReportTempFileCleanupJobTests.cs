@@ -78,6 +78,8 @@ public sealed class QuarterlyReportTempFileCleanupJobTests : IDisposable
     private sealed class FakeActivity(bool pending) : IQuarterlyReportActivity
     {
         public bool HasPendingReportWork() => pending;
+
+        public QuarterlyReportRun? FindRun(string jobId) => throw new NotSupportedException();
     }
 
     private sealed class FakeEnvironment : IHostEnvironment

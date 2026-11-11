@@ -47,8 +47,8 @@ public sealed class QuarterlyReportTempFileCleanupJob(
             return;
         }
 
-        // The age check stays: admin-triggered runs write outside Hangfire, and a
-        // run can start between the check above and this delete.
+        // The age check stays: a run can start between the check above and
+        // this delete.
         var writtenBefore = now - options.Value.StaleTempFileAge;
         var deleted = csvWriter.DeleteStaleTempFiles(writtenBefore, cancellationToken);
 

@@ -55,6 +55,39 @@ public sealed class QuarterlyReportActivityTests
         Assert.True(Activity.HasPendingReportWork());
     }
 
+    [Fact]
+    public void FindRun_ForASucceededReportJob_ReturnsItsArgumentsStateAndResult()
+    {
+        var id = Client.Enqueue<QuarterlyReportJob>(job => job.RunAsync(7, 2026, 3, CancellationToken.None));
+        Assert.True(Client.ChangeState(id, new SucceededState(QuarterlyReportRunResult.AlreadyGenerated, 1, 1)));
+
+        var run = Activity.FindRun(id);
+
+        Assert.Equal(
+            new QuarterlyReportRun(id, 7, new ReportingQuarter(2026, 3), SucceededState.StateName, QuarterlyReportRunResult.AlreadyGenerated),
+            run);
+    }
+
+    [Fact]
+    public void FindRun_ForAQueuedReportJob_HasNoResultYet()
+    {
+        var id = Client.Enqueue<QuarterlyReportJob>(job => job.RunAsync(7, 2026, 3, CancellationToken.None));
+
+        var run = Activity.FindRun(id);
+
+        Assert.Equal(EnqueuedState.StateName, run?.State);
+        Assert.Null(run?.Result);
+    }
+
+    [Fact]
+    public void FindRun_ForAnotherKindOfJob_OrAnUnknownId_ReturnsNull()
+    {
+        var emailJob = Client.Enqueue<QuarterlyReportEmailJob>(job => job.QueueRecipientsAsync(7, 2026, 3, CancellationToken.None));
+
+        Assert.Null(Activity.FindRun(emailJob));
+        Assert.Null(Activity.FindRun("999999"));
+    }
+
     /// <summary>
     /// Hangfire's <see cref="ProcessingState"/> can only be created by a worker,
     /// so this stands in for it: same state name and data.
