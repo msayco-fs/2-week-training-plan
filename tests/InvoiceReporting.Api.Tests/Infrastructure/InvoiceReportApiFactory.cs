@@ -4,7 +4,6 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
@@ -16,19 +15,24 @@ namespace InvoiceReporting.Api.Tests.Infrastructure;
 /// <summary>
 /// Hosts the real application pipeline with two substitutions:
 /// <list type="bullet">
-/// <item>SQL Server is replaced by a private SQLite in-memory database, created and seeded per factory instance.</item>
+/// <item>The SQL Server connection points at a private SQL Server database (Docker, see
+/// <see cref="SqlServerTestDatabase"/>), created by the real migrations and seeded per factory instance.</item>
 /// <item>Hangfire's SQL Server storage is replaced by in-memory storage.</item>
 /// <item>JWT bearer is replaced by <see cref="TestAuthHandler"/> as the default scheme.
 /// Placeholder JWT bearer settings are supplied only to pass the startup check.</item>
 /// <item>The <see cref="TenantAccessHandler"/> logger is replaced by <see cref="TenantAccessLogger"/>,
 /// so tests can check the denial events a real request writes.</item>
 /// </list>
-/// SQLite is relational (foreign keys, unique indexes, real SQL translation) but does
-/// not validate SQL Server-specific behaviour such as collation or decimal precision.
 /// </summary>
-public sealed class InvoiceReportApiFactory : WebApplicationFactory<Program>
+public sealed class InvoiceReportApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
-    private readonly SqliteConnection _connection = new("DataSource=:memory:");
+    private string _connectionString = null!;
+
+    /// <summary>Creates this factory's own database before any test in the class runs.</summary>
+    public async Task InitializeAsync() => _connectionString = await SqlServerTestDatabase.CreateAsync();
+
+    // Nothing extra: the host is disposed by WebApplicationFactory, the database with the container.
+    Task IAsyncLifetime.DisposeAsync() => Task.CompletedTask;
 
     /// <summary>
     /// Receives every log entry of the app's <see cref="TenantAccessHandler"/>.
@@ -55,7 +59,7 @@ public sealed class InvoiceReportApiFactory : WebApplicationFactory<Program>
         {
             services.RemoveAll<DbContextOptions<ReportingDbContext>>();
             services.RemoveAll<IDbContextOptionsConfiguration<ReportingDbContext>>();
-            services.AddDbContext<ReportingDbContext>(options => options.UseSqlite(_connection));
+            services.AddDbContext<ReportingDbContext>(options => options.UseSqlServer(_connectionString));
             services.UseInMemoryHangfire();
 
             // The handler is a singleton, so it takes this logger once at startup.
@@ -74,47 +78,10 @@ public sealed class InvoiceReportApiFactory : WebApplicationFactory<Program>
         });
     }
 
-    protected override void ConfigureClient(HttpClient client)
-    {
-        base.ConfigureClient(client);
-        EnsureDatabase();
-    }
-
-    private bool _databaseCreated;
-    private readonly Lock _databaseLock = new();
-
-    private void EnsureDatabase()
-    {
-        lock (_databaseLock)
-        {
-            if (_databaseCreated)
-            {
-                return;
-            }
-
-            _connection.Open();
-            using var scope = Services.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<ReportingDbContext>();
-            db.Database.EnsureCreated();
-            TestData.Seed(db);
-            _databaseCreated = true;
-        }
-    }
-
     /// <summary>Runs <paramref name="action"/> against the test database in a fresh scope.</summary>
     public async Task<T> WithDbAsync<T>(Func<ReportingDbContext, Task<T>> action)
     {
-        EnsureDatabase();
         using var scope = Services.CreateScope();
         return await action(scope.ServiceProvider.GetRequiredService<ReportingDbContext>());
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        base.Dispose(disposing);
-        if (disposing)
-        {
-            _connection.Dispose();
-        }
     }
 }

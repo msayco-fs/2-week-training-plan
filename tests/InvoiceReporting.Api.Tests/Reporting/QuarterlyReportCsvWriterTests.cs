@@ -69,7 +69,7 @@ public sealed class QuarterlyReportCsvWriterTests : IDisposable
         var error = await Assert.ThrowsAnyAsync<Exception>(() => writer.WriteAsync(1, quarter, Empty, CancellationToken.None));
 
         Assert.True(error is IOException or UnauthorizedAccessException, $"Unexpected {error.GetType().Name}");
-        Assert.False(File.Exists(path + ".tmp"));
+        Assert.Empty(TempFiles());
     }
 
     [Fact]
@@ -84,7 +84,7 @@ public sealed class QuarterlyReportCsvWriterTests : IDisposable
 
         var path = writer.GetPath(1, quarter);
         Assert.False(File.Exists(path));
-        Assert.False(File.Exists(path + ".tmp"));
+        Assert.Empty(TempFiles());
     }
 
     /// <summary>
@@ -103,10 +103,104 @@ public sealed class QuarterlyReportCsvWriterTests : IDisposable
         await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WriteAsync(1, quarter, FailAfterOneRow(), CancellationToken.None));
 
         Assert.Equal(olderText, await File.ReadAllTextAsync(older.Path));
-        Assert.False(File.Exists(older.Path + ".tmp"));
+        Assert.Empty(TempFiles());
+    }
+
+    /// <summary>
+    /// Two writes for the same tenant and quarter at once. The first is held
+    /// with its temp file open while the second runs start to finish. Both
+    /// must succeed, the report must be complete, and no temp file may be left.
+    /// </summary>
+    [Fact]
+    public async Task WriteAsync_TwoWritesForTheSameQuarterAtOnce_BothSucceed_AndTheReportIsComplete()
+    {
+        var writer = CreateWriter();
+        var quarter = new ReportingQuarter(2025, 1);
+        var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var first = writer.WriteAsync(
+            1, quarter, Held(firstStarted, releaseFirst, new InvoiceSummary(1, "First", 1m, new DateOnly(2025, 1, 2))),
+            CancellationToken.None);
+        QuarterlyReportCsvFile second;
+        try
+        {
+            // The first write now holds its temp file open.
+            await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            second = await writer.WriteAsync(
+                1, quarter, new[] { new InvoiceSummary(2, "Second", 2m, new DateOnly(2025, 2, 3)) }.ToAsyncEnumerable(),
+                CancellationToken.None);
+        }
+        finally
+        {
+            // Always release, so a failure never leaves the first write (and its open file) stuck.
+            releaseFirst.TrySetResult();
+        }
+
+        var firstReport = await first;
+
+        Assert.Equal(second.Path, firstReport.Path);
+        // The first write moved its file in last, so its rows are the final report.
+        Assert.Equal(
+            ["InvoiceId,CustomerName,IssuedDate,Amount", "1,First,2025-01-02,1.00", "Total,,,1.00"],
+            await File.ReadAllLinesAsync(firstReport.Path));
+        Assert.Empty(TempFiles());
+    }
+
+    /// <summary>
+    /// Only report temp files older than the cut-off are deleted. A recent temp
+    /// file (a write still in progress), the report itself and other .tmp files stay.
+    /// </summary>
+    [Fact]
+    public void DeleteStaleTempFiles_DeletesOnlyOldReportTempFiles()
+    {
+        var writer = CreateWriter();
+        var now = DateTime.UtcNow;
+        var oldTemp = CreateFile($"2026-Q1-tenant-1.csv.{Guid.NewGuid():N}.tmp", now.AddDays(-2));
+        var oldLegacyTemp = CreateFile("2026-Q1-tenant-2.csv.tmp", now.AddDays(-2));
+        var activeTemp = CreateFile($"2026-Q1-tenant-3.csv.{Guid.NewGuid():N}.tmp", now);
+        var report = CreateFile("2026-Q1-tenant-1.csv", now.AddDays(-2));
+        var otherTemp = CreateFile("notes.tmp", now.AddDays(-2));
+
+        var deleted = writer.DeleteStaleTempFiles(now.AddDays(-1), CancellationToken.None);
+
+        Assert.Equal(2, deleted);
+        Assert.False(File.Exists(oldTemp));
+        Assert.False(File.Exists(oldLegacyTemp));
+        Assert.True(File.Exists(activeTemp));
+        Assert.True(File.Exists(report));
+        Assert.True(File.Exists(otherTemp));
+    }
+
+    [Fact]
+    public void DeleteStaleTempFiles_WhenTheFolderDoesNotExist_DeletesNothing()
+    {
+        Assert.Equal(0, CreateWriter().DeleteStaleTempFiles(DateTimeOffset.UtcNow, CancellationToken.None));
     }
 
     private static IAsyncEnumerable<InvoiceSummary> Empty => AsyncEnumerable.Empty<InvoiceSummary>();
+
+    private string CreateFile(string name, DateTime lastWriteUtc)
+    {
+        Directory.CreateDirectory(_outputDirectory);
+        var path = Path.Combine(_outputDirectory, name);
+        File.WriteAllText(path, "x");
+        File.SetLastWriteTimeUtc(path, lastWriteUtc);
+        return path;
+    }
+
+    private string[] TempFiles() =>
+        Directory.Exists(_outputDirectory) ? Directory.GetFiles(_outputDirectory, "*.tmp") : [];
+
+    /// <summary>Signals <paramref name="started"/>, waits for <paramref name="release"/>, then yields one invoice.</summary>
+    private static async IAsyncEnumerable<InvoiceSummary> Held(
+        TaskCompletionSource started, TaskCompletionSource release, InvoiceSummary invoice,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        started.TrySetResult();
+        await release.Task.WaitAsync(cancellationToken);
+        yield return invoice;
+    }
 
     private static async IAsyncEnumerable<InvoiceSummary> FailAfterOneRow([EnumeratorCancellation] CancellationToken cancellationToken = default)
     {

@@ -16,7 +16,8 @@ public sealed partial class TenantResolver(ITenantRepository tenants) : ITenantR
         }
 
         // Keys are stored lower-case so lookups behave the same on every
-        // database collation (SQL Server is case-insensitive, SQLite is not).
+        // database collation (the default SQL Server collation is
+        // case-insensitive, others may not be).
         var normalizedKey = requestedTenantKey.Trim().ToLowerInvariant();
         if (!TenantKeyPattern().IsMatch(normalizedKey))
         {

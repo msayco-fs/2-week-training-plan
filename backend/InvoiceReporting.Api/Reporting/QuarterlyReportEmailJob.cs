@@ -51,6 +51,14 @@ public sealed class QuarterlyReportEmailJob(
     public static readonly TimeSpan ClaimLease = TimeSpan.FromMinutes(5);
 
     /// <summary>
+    /// Time limit for cleanup database calls that must run even when the job's
+    /// token is cancelled (freeing a claim, marking an email sent, recording a
+    /// failure). Below the host's 30-second shutdown wait, so a stuck database
+    /// cannot hold up shutdown.
+    /// </summary>
+    public static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// How many times Hangfire retries a failed send. The job runs at most
     /// <c>MaxRetries + 1</c> times; the last run is the one where Hangfire's
     /// <c>RetryCount</c> job parameter equals this value.
@@ -195,23 +203,24 @@ public sealed class QuarterlyReportEmailJob(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // Stopped before sending. Free the claim (with None: this cleanup
-            // must run although the job's token is cancelled), record nothing
-            // as failed, and let Hangfire requeue the job.
-            await deliveries.ReleaseAsync(claim, CancellationToken.None);
+            // Stopped before sending. Free the claim (with its own time limit,
+            // not the job's token: this cleanup must run although the job's
+            // token is cancelled), record nothing as failed, and let Hangfire
+            // requeue the job.
+            await TryReleaseAsync(claim, tenantId, userId, quarter);
             throw;
         }
         catch (Exception ex)
         {
             // Not sent, so free the claim and let the retry try again.
-            await deliveries.ReleaseAsync(claim, CancellationToken.None);
+            await TryReleaseAsync(claim, tenantId, userId, quarter);
             await RecordAttemptFailedAsync(tenantId, userId, quarter, ReportEmailFailureReasons.Temporary, retryCount, jobId, ex);
             throw;
         }
 
         if (zip is null)
         {
-            await deliveries.ReleaseAsync(claim, CancellationToken.None);
+            await TryReleaseAsync(claim, tenantId, userId, quarter);
             // The CSV size is logged: the zip's size is unknown once it passes the limit.
             logger.LogWarning(
                 "Report {Quarter} for tenant {TenantId} ({CsvSize}-byte CSV) zips to over the {Limit}-byte email limit; not emailed to user {UserId}",
@@ -236,7 +245,7 @@ public sealed class QuarterlyReportEmailJob(
             // The provider refused the email, so a retry would fail the same
             // way. Free the claim so a manual re-run can send it, and return
             // without throwing so Hangfire does not retry.
-            await deliveries.ReleaseAsync(claim, CancellationToken.None);
+            await TryReleaseAsync(claim, tenantId, userId, quarter);
             logger.LogWarning(
                 "Provider rejected report {Quarter} email for tenant {TenantId}, user {UserId}: {Reason}",
                 quarter, tenantId, userId, ex.Reason);
@@ -262,17 +271,22 @@ public sealed class QuarterlyReportEmailJob(
         catch (Exception ex)
         {
             // Not sent, so free the claim and let the retry try again.
-            await deliveries.ReleaseAsync(claim, CancellationToken.None);
+            await TryReleaseAsync(claim, tenantId, userId, quarter);
             await RecordAttemptFailedAsync(tenantId, userId, quarter, ReportEmailFailureReasons.Temporary, retryCount, jobId, ex);
             throw;
         }
 
         // If this save fails, the claim stays in the Sending state. Retries see
         // InProgress until the lease expires, then take over and ask the
-        // provider before sending again. Saved with None, not the job's token:
-        // the email is already out, so a shutdown now must not skip recording
-        // it (SMTP cannot be asked later and would send it a second time).
-        await MarkSentAsync(claim, tenantId, userId, quarter, CancellationToken.None);
+        // provider before sending again. Saved with its own time limit, not the
+        // job's token: the email is already out, so a shutdown now must not skip
+        // recording it (SMTP cannot be asked later and would send it a second
+        // time). The limit stops a stuck database from holding up shutdown; if
+        // it is hit, the error goes to Hangfire.
+        using (var timeout = new CancellationTokenSource(CleanupTimeout, timeProvider))
+        {
+            await MarkSentAsync(claim, tenantId, userId, quarter, timeout.Token);
+        }
 
         // The address is not logged; the user id is enough to trace it.
         logger.LogInformation("Emailed report {Quarter} for tenant {TenantId} to user {UserId}", quarter, tenantId, userId);
@@ -291,6 +305,26 @@ public sealed class QuarterlyReportEmailJob(
         }, cancellationToken);
 
     /// <summary>
+    /// Frees the claim within <see cref="CleanupTimeout"/>. Never throws: a
+    /// failure here must not replace the cancellation or error being handled.
+    /// The claim then stays until its lease ends, and the next run takes it over.
+    /// </summary>
+    private async Task TryReleaseAsync(EmailDeliveryClaim claim, int tenantId, int userId, ReportingQuarter quarter)
+    {
+        using var timeout = new CancellationTokenSource(CleanupTimeout, timeProvider);
+        try
+        {
+            await deliveries.ReleaseAsync(claim, timeout.Token);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "Could not free the report {Quarter} email claim for tenant {TenantId}, user {UserId}; it is freed when its lease ends",
+                quarter, tenantId, userId);
+        }
+    }
+
+    /// <summary>
     /// Records an email that will not be sent without help: one line in the
     /// failed-email log file, then one <see cref="AuditActions.EmailQuarterlyInvoiceReportFailed"/>
     /// entry. Skipped when the same failure is already in the audit log, so a
@@ -304,9 +338,13 @@ public sealed class QuarterlyReportEmailJob(
     {
         var detail = ReportEmailFailureReasons.Detail(quarter, userId, reason);
 
+        // Own time limit, not the job's token: this must run while the job is
+        // stopping, but a stuck database must not hold up shutdown.
+        using var timeout = new CancellationTokenSource(CleanupTimeout, timeProvider);
+
         try
         {
-            if (await audits.ExistsAsync(tenantId, AuditActions.EmailQuarterlyInvoiceReportFailed, detail, CancellationToken.None))
+            if (await audits.ExistsAsync(tenantId, AuditActions.EmailQuarterlyInvoiceReportFailed, detail, timeout.Token))
             {
                 return;
             }
@@ -328,7 +366,7 @@ public sealed class QuarterlyReportEmailJob(
                 Detail = detail,
                 ActorSubject = null, // System job, no caller.
                 OccurredAtUtc = timeProvider.GetUtcNow(),
-            }, CancellationToken.None);
+            }, timeout.Token);
         }
         catch (Exception ex)
         {
@@ -358,6 +396,9 @@ public sealed class QuarterlyReportEmailJob(
             return;
         }
 
+        // Own time limit, for the same reason as in RecordFailedAsync.
+        using var timeout = new CancellationTokenSource(CleanupTimeout, timeProvider);
+
         try
         {
             // One entry per attempt, so no duplicate check.
@@ -368,7 +409,7 @@ public sealed class QuarterlyReportEmailJob(
                 Detail = ReportEmailFailureReasons.Detail(quarter, userId, reason),
                 ActorSubject = null, // System job, no caller.
                 OccurredAtUtc = timeProvider.GetUtcNow(),
-            }, CancellationToken.None);
+            }, timeout.Token);
         }
         catch (Exception ex)
         {

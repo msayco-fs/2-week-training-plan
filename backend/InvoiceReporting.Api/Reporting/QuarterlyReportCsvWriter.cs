@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 
 namespace InvoiceReporting.Api.Reporting;
@@ -12,6 +13,12 @@ public sealed class QuarterlyReportCsvWriter(
     IOptions<QuarterlyReportOutputOptions> options,
     IHostEnvironment environment)
 {
+    // Temp file names: "<report name>.<32 hex chars>.tmp". The old fixed name
+    // "<report name>.tmp" also matches, so leftovers from before are removed too.
+    private static readonly Regex TempFileName = new(
+        @"^\d{4}-Q[1-4]-tenant-\d+\.csv(\.[0-9a-f]{32})?\.tmp$",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
     public string OutputDirectory =>
         Path.GetFullPath(Path.Combine(environment.ContentRootPath, options.Value.Directory));
 
@@ -35,13 +42,14 @@ public sealed class QuarterlyReportCsvWriter(
         Directory.CreateDirectory(OutputDirectory);
         var path = GetPath(tenantId, quarter);
 
-        // Summed here, in C#, like the monthly report: SQLite (used in tests)
-        // cannot aggregate decimal columns.
+        // Summed while each row is written, so the total needs no second query.
         var count = 0;
         var total = 0m;
 
         // Write to a temporary file first, so a crash never leaves a half-written report.
-        var tempPath = path + ".tmp";
+        // Each run gets its own temp name: two runs for the same quarter at once
+        // (the schedule and an admin trigger) never open or delete each other's file.
+        var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -69,11 +77,44 @@ public sealed class QuarterlyReportCsvWriter(
             // a partial temp file behind. An older report file for the same
             // quarter is kept. The original error (including
             // OperationCanceledException) is rethrown.
-            TryDelete(tempPath);
+            _ = TryDelete(tempPath);
             throw;
         }
 
         return new QuarterlyReportCsvFile(path, count, total);
+    }
+
+    /// <summary>
+    /// Deletes temp files left by runs that stopped without cleaning up, for
+    /// example when the process was killed. Only files last written before
+    /// <paramref name="writtenBeforeUtc"/> are deleted, so a write still in
+    /// progress is never touched. Returns how many files were deleted.
+    /// </summary>
+    public int DeleteStaleTempFiles(DateTimeOffset writtenBeforeUtc, CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(OutputDirectory))
+        {
+            return 0;
+        }
+
+        var deleted = 0;
+        foreach (var file in Directory.EnumerateFiles(OutputDirectory, "*.tmp", SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var info = new FileInfo(file);
+            if (!TempFileName.IsMatch(info.Name) || !info.Exists || info.LastWriteTimeUtc >= writtenBeforeUtc.UtcDateTime)
+            {
+                continue;
+            }
+
+            if (TryDelete(file))
+            {
+                deleted++;
+            }
+        }
+
+        return deleted;
     }
 
     private static string FormatRow(InvoiceSummary invoice) =>
@@ -83,15 +124,18 @@ public sealed class QuarterlyReportCsvWriter(
             invoice.IssuedDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             invoice.Amount.ToString("0.00", CultureInfo.InvariantCulture));
 
-    private static void TryDelete(string path)
+    private static bool TryDelete(string path)
     {
         try
         {
             File.Delete(path);
+            return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Best effort. The next run overwrites the file anyway.
+            // Best effort. A leftover temp file has a unique name, so it never
+            // blocks a later run; the stale-file cleanup removes it.
+            return false;
         }
     }
 

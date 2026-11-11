@@ -9,15 +9,14 @@ namespace InvoiceReporting.Api.Reporting;
 /// Builds the quarterly invoice report for one tenant, saves it as a CSV file
 /// (see <see cref="QuarterlyReportCsvWriter"/>), records an audit entry and
 /// queues the report emails (see <see cref="QuarterlyReportEmailJob"/>).
-/// Queued by <see cref="QuarterlyReportScheduler"/>, or run directly by
-/// <see cref="Controllers.QuarterlyReportAdminController"/>.
+/// Queued by <see cref="QuarterlyReportScheduler"/>, or by
+/// <see cref="Controllers.QuarterlyReportAdminController"/> for one tenant.
 /// </summary>
 /// <remarks>
 /// Cancellation: the token is passed to every database query, the file write
 /// and checked between stages. A cancelled run throws
 /// <see cref="OperationCanceledException"/> and never returns a result, so it
-/// is never reported as done. Under Hangfire the token is the server shutdown
-/// token; over HTTP it is the request-aborted token.
+/// is never reported as done. The token is the Hangfire server's shutdown token.
 /// </remarks>
 public sealed class QuarterlyReportJob(
     IInvoiceRepository invoiceRepository,

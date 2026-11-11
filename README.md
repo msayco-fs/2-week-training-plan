@@ -48,7 +48,7 @@ day-03-threat-model.md            STRIDE-lite threat model and repository sweep
 | .NET SDK / target framework | 10.0.401 / `net10.0` |
 | ASP.NET Core, EF Core, JwtBearer, Mvc.Testing | 10.0.13 |
 | Database provider (app) | SQL Server (`Microsoft.EntityFrameworkCore.SqlServer`) |
-| Database provider (tests) | SQLite in-memory (`Microsoft.EntityFrameworkCore.Sqlite`) |
+| Database provider (tests) | SQL Server 2022 in Docker, via Testcontainers (`Testcontainers.MsSql`) |
 | xUnit | 2.9.3 |
 | Node.js / npm | 24.x / 11.19.0 |
 | Angular / Angular CLI | 22.2 |
@@ -288,9 +288,10 @@ subject).
 
 `POST /api/admin/quarterly-reports/{year}/{quarter}`
 
-Builds one tenant's quarterly CSV inside the request, then queues its emails
-in Hangfire. A quarter that was already reported is not built again; only its
-emails are queued again (people who already got the email are skipped).
+Queues one tenant's quarterly report as a Hangfire job and returns at once.
+The job builds the CSV and then queues its emails, with the same retries as a
+scheduled run. A quarter that was already reported is not built again; only
+its emails are queued again (people who already got the email are skipped).
 
 | Input | Where | Rules |
 | --- | --- | --- |
@@ -303,23 +304,36 @@ then the same `TenantAccess` policy as the monthly report. A standard user
 gets `403`, even for their own tenant. Each call is audited as
 `TriggerQuarterlyInvoiceReport` with the caller's subject.
 
-`200 OK`: `{ "tenantKey": "dealer-alpha", "quarter": "2026-Q3", "result": "Generated" }`
-(`result` is `Generated` or `AlreadyGenerated`).
+`202 Accepted`: `{ "tenantKey": "dealer-alpha", "quarter": "2026-Q3", "jobId": "8812" }`,
+with a `Location` header pointing to the run's status URL (below). The trigger
+is audited before the job is queued, so a run that later fails is still
+traceable to the administrator.
 
 Errors: `400` (bad year, quarter or tenant header), `401`, `403`, `404`
-(unknown tenant), `429`. If the caller disconnects, the run is cancelled: the
-request's token reaches every database query and the file write, and no CSV,
-"generated" audit entry or email job is recorded.
+(unknown tenant), `429`.
 
-**Long runs.** The CSV is built inside the request, so the call takes as long
-as the quarter's query and file write. A reverse proxy or client timeout
-shorter than that (many proxies default to 60 to 120 seconds) closes the
-connection and cancels the run, as above. Nothing is half-recorded: call the
-endpoint again, or let the scheduled job run it. For very large tenants,
-raise the proxy timeout for `/api/admin/quarterly-reports`. For the quarter
-that just ended, the Hangfire dashboard's **Trigger now** is another option:
-it queues every tenant as background jobs, with no request timeout. A queued
-mode for this endpoint that returns `202 Accepted` is not provided.
+The request only queues the run, so a slow quarter never hits a proxy or
+client timeout, and closing the connection does not stop a run that is already
+queued. To stop one, delete the job in the Hangfire dashboard. A host shutdown
+cancels a running job; Hangfire runs it again after the restart. Two triggers
+for the same quarter queue two jobs. That is safe: the audit log's unique
+index lets only one of them record the quarter, and the other finishes as
+`AlreadyGenerated`.
+
+`GET /api/admin/quarterly-reports/runs/{jobId}` returns the run's state:
+
+`200 OK`: `{ "jobId": "8812", "tenantKey": "dealer-alpha", "quarter": "2026-Q3", "state": "Succeeded", "result": "Generated" }`
+
+- `state` is Hangfire's state name: `Enqueued`, `Processing`, `Scheduled`
+  (failed, waiting for its next retry), `Succeeded`, `Failed` (retries used
+  up) or `Deleted`.
+- `result` is `Generated` or `AlreadyGenerated` once the run has succeeded,
+  otherwise `null`.
+
+Same inputs and checks as the trigger: `X-Dealer-Id` and the `PlatformAdmin`
+role are required, then the `TenantAccess` policy. It returns `404` for an
+unknown job id, a job that is not a quarterly report run, or another tenant's
+run, so a job id never reveals other jobs. Polling counts toward the rate limit.
 
 The Hangfire dashboard's **Trigger now** is a second way to run the job. It
 needs a `PlatformAdmin` caller too (no per-tenant check: the dashboard covers
@@ -328,16 +342,22 @@ every tenant); see the dashboard note under
 
 #### Async and cancellation: what stays synchronous
 
-The report pipeline is async from end to end. The caller's token (the
-request-aborted token over HTTP, Hangfire's shutdown token in a job) reaches
-every database query, the CSV write, the zip, the provider lookup and the
+The report pipeline is async from end to end. Every report run is a Hangfire
+job, and Hangfire's shutdown token reaches every database query, the CSV write, the zip, the provider lookup and the
 send. The invoices are streamed (`IAsyncEnumerable<InvoiceSummary>` read with
 `await foreach`): each row goes from the query straight to the CSV file, so a
 large quarter is never held in memory. The database query stays open while
 the file is written.
 
-`NoBlockingCallsTests` fails the build on `.Result`, `.Wait()`,
-`GetAwaiter().GetResult()`, `Task.Run` or `async void` in `backend/`.
+The backend build fails on blocking async code. Rules from
+`Microsoft.VisualStudio.Threading.Analyzers` are set to errors in the API's
+`.csproj`: VSTHRD002 (`.Result`, `.Wait()`, `Task.WaitAll`/`WaitAny`,
+`GetAwaiter().GetResult()`), VSTHRD100 (`async void`) and VSTHRD103 (a sync
+call inside an async method where an async version exists).
+`Microsoft.CodeAnalysis.BannedApiAnalyzers` bans `Task.Run` and `TaskFactory`
+through `backend/InvoiceReporting.Api/BannedSymbols.txt` (error RS0030). These
+rules check types, not names, so renamed variables and calls split across
+lines are still caught.
 
 A few calls stay synchronous on purpose. .NET has no async version of them,
 and wrapping them in `Task.Run` would only move the wait to another thread.
@@ -348,7 +368,10 @@ transfer:
 | --- | --- | --- |
 | `Directory.CreateDirectory` | `QuarterlyReportCsvWriter`, `FailedReportEmailLogFile` | Returns at once when the folder exists, which is every run after the first. |
 | `File.Move(temp, path, overwrite: true)` | `QuarterlyReportCsvWriter` | A rename on the same volume. It is what makes the report replace atomic. |
-| `File.Delete` | `QuarterlyReportCsvWriter` (temp cleanup), `FailedReportEmailLogFile` (retention) | Cleanup only. Failures are ignored and retried on the next run or day. |
+| `File.Delete` | `QuarterlyReportCsvWriter` (temp cleanup, stale temp files after each schedule run), `FailedReportEmailLogFile` (retention) | Cleanup only. Failures are ignored and retried on the next run or day. |
+| `Directory.EnumerateFiles`, `FileInfo` | `QuarterlyReportCsvWriter.DeleteStaleTempFiles` | Lists one folder once per quarter to find stale temp files. |
+| `IMonitoringApi` (processing, scheduled, enqueued jobs) | `HangfireQuarterlyReportActivity` | Hangfire's API is synchronous. Read once every 5 minutes, only while the cleanup waits. |
+| `IMonitoringApi.JobDetails` | `HangfireQuarterlyReportActivity.FindRun` (admin run status) | Hangfire's API is synchronous. One read of one job per status request. |
 | `File.Exists` | `QuarterlyReportEmailJob` | Checks the CSV is there before claiming the email. |
 | `File.GetLastWriteTime` | `QuarterlyReportZip` | Sets the zip entry's date. |
 | `new FileInfo(path).Length` | `QuarterlyReportEmailJob` | Only in the "too large" log message. |
@@ -359,14 +382,17 @@ The `CancellationToken.None` uses in `backend/` are also intentional:
 
 - **Hangfire placeholders** in `Enqueue(...)` and the recurring job: Hangfire
   replaces them with its shutdown token when the job runs.
-- **Releasing an email claim** after a failure or a cancel: the cleanup must
-  run even when the job's token is already cancelled.
-- **Marking an email sent**: the email is already out, so the record must be
-  saved.
-- **Failure audit writes** (and their duplicate check): a failure must be
-  recorded even while the job is stopping.
 - **SMTP `DisconnectAsync` after the server accepted the email**: a failed
   QUIT must not undo a send.
+
+Cleanup in `QuarterlyReportEmailJob` that must outlive the job's token
+(freeing an email claim after a failure or a cancel, marking an email sent,
+failure audit writes and their duplicate check) uses its own 10-second token
+(`QuarterlyReportEmailJob.CleanupTimeout`) instead of the job's token or
+`CancellationToken.None`. It runs while the job is stopping, but a stuck
+database cannot hold up shutdown. Freeing a claim never throws, so the
+original error or cancellation reaches Hangfire; a claim that could not be
+freed is taken over once its lease ends.
 
 ### Quarterly report emails
 
@@ -615,7 +641,9 @@ The front end is the unchanged Angular starter. It does not call the API yet.
 
 ## Build, lint and test
 
-These are the same commands CI runs.
+These are the same commands CI runs. The backend tests need Docker running
+(Docker Desktop on Windows and macOS). The first run downloads the SQL Server
+image (about 1.5 GB).
 
 ```bash
 # Backend
@@ -650,12 +678,14 @@ dotnet test InvoiceReporting.slnx --filter "FullyQualifiedName~TenantAuthorizati
 
 ### Test database
 
-Integration tests use a private SQLite in-memory database per test class,
-created and seeded with fixed fictitious data. SQLite enforces foreign keys and
-unique indexes and runs real SQL. It does **not** check SQL Server behavior
-such as collation, `decimal(18,2)` precision or query plans. The SQL Server
-path, and the real JWT bearer path (including the `PlatformAdmin` role claim
-from `dotnet user-jwts --role`), were checked by hand against LocalDB.
+Integration tests run against SQL Server 2022 in a Docker container started by
+Testcontainers, the same image as `docker-compose.yml`. One container serves
+the whole test run, and each test class gets its own database, created by the
+real EF Core migrations and seeded with fixed fictitious data. So the tests
+check the same collation, `decimal(18,2)` precision, filtered unique index and
+error numbers as production, and they fail if a migration breaks. The real JWT
+bearer path (including the `PlatformAdmin` role claim from
+`dotnet user-jwts --role`) was checked by hand.
 
 Tests authenticate with `TestAuthHandler`, not JWT bearer, so automated tests
 do not cover token validation or the JWT claim mapping.

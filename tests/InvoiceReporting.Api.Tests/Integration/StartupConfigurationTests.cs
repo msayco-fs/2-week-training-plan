@@ -116,6 +116,21 @@ public sealed class StartupConfigurationTests
         Assert.Contains("MaxAttachmentBytes", validation.Message);
     }
 
+    [Theory]
+    [InlineData("00:00:00")]
+    [InlineData("00:59:59")]
+    public void StaleTempFileAge_UnderOneHour_FailsAtStartup(string staleTempFileAge)
+    {
+        using var factory = CreateProductionFactory(
+            ("Reporting:QuarterlyOutput:StaleTempFileAge", staleTempFileAge));
+
+        var exception = Record.Exception(() => factory.CreateClient());
+
+        var validation = FindInChain<OptionsValidationException>(exception);
+        Assert.NotNull(validation);
+        Assert.Contains("StaleTempFileAge", validation.Message);
+    }
+
     /// <summary>A Production host with valid JWT settings, plus the given extra settings.</summary>
     private static WebApplicationFactory<Program> CreateProductionFactory(params (string Key, string Value)[] settings) =>
         new WebApplicationFactory<Program>()
