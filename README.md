@@ -361,14 +361,17 @@ The `CancellationToken.None` uses in `backend/` are also intentional:
 
 - **Hangfire placeholders** in `Enqueue(...)` and the recurring job: Hangfire
   replaces them with its shutdown token when the job runs.
-- **Releasing an email claim** after a failure or a cancel: the cleanup must
-  run even when the job's token is already cancelled.
-- **Marking an email sent**: the email is already out, so the record must be
-  saved.
-- **Failure audit writes** (and their duplicate check): a failure must be
-  recorded even while the job is stopping.
 - **SMTP `DisconnectAsync` after the server accepted the email**: a failed
   QUIT must not undo a send.
+
+Cleanup in `QuarterlyReportEmailJob` that must outlive the job's token
+(freeing an email claim after a failure or a cancel, marking an email sent,
+failure audit writes and their duplicate check) uses its own 10-second token
+(`QuarterlyReportEmailJob.CleanupTimeout`) instead of the job's token or
+`CancellationToken.None`. It runs while the job is stopping, but a stuck
+database cannot hold up shutdown. Freeing a claim never throws, so the
+original error or cancellation reaches Hangfire; a claim that could not be
+freed is taken over once its lease ends.
 
 ### Quarterly report emails
 

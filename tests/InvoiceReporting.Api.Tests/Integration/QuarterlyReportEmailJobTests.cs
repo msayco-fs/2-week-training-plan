@@ -581,6 +581,106 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
             inner.ReleaseAsync(claim, cancellationToken);
     }
 
+    /// <summary>
+    /// The database is down while the claim is freed during a cancel. The
+    /// cancellation must still reach Hangfire, so the job is requeued, not failed.
+    /// </summary>
+    [Fact]
+    public async Task SendAsync_WhenCancelledBeforeZipping_AndFreeingTheClaimFails_StillThrowsTheCancellation()
+    {
+        var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
+        await WriteCsvAsync(tenantId, new ReportingQuarter(2016, 1));
+        using var cts = new CancellationTokenSource();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            RunAsync(
+                job => job.SendAsync(tenantId, userId, 2016, 1, null, cts.Token),
+                cancelAfterClaim: cts,
+                wrapDeliveries: inner => new CleanupSpyRepository(inner, failRelease: true)));
+
+        Assert.Empty(_sender.Sent);
+        // Not freed, so it waits for its lease to end like a crashed job's claim.
+        Assert.Equal(EmailDeliveryStatus.Sending, (await DeliveryAsync(tenantId, userId, "2016-Q1")).Status);
+        await AssertNoFailureRecordedAsync(tenantId, "2016-Q1");
+    }
+
+    [Fact]
+    public async Task SendAsync_WhenTheSendFails_AndFreeingTheClaimFails_ThrowsTheSendError_AndRecordsTheAttempt()
+    {
+        var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
+        await WriteCsvAsync(tenantId, new ReportingQuarter(2016, 2));
+        _sender.FailNextSends = 1;
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            RunAsync(
+                job => job.SendAsync(tenantId, userId, 2016, 2, null, CancellationToken.None),
+                wrapDeliveries: inner => new CleanupSpyRepository(inner, failRelease: true)));
+
+        Assert.Equal(
+            [$"2016-Q2:user-{userId}:temporary"],
+            await AuditDetailsAsync(AuditActions.EmailQuarterlyInvoiceReportAttemptFailed, tenantId, "2016-Q2"));
+    }
+
+    /// <summary>
+    /// Cleanup calls must still run when the job's token is cancelled, but with
+    /// their own time limit (<c>QuarterlyReportEmailJob.CleanupTimeout</c>),
+    /// not <see cref="CancellationToken.None"/>, so a stuck database cannot hold up shutdown.
+    /// </summary>
+    [Fact]
+    public async Task SendAsync_CleanupCalls_UseATimeLimitedToken_NotTheJobsToken()
+    {
+        var (tenantId, userId) = await TenantAAndUserAsync(TestData.AlphaUserSubject);
+        await WriteCsvAsync(tenantId, new ReportingQuarter(2016, 3));
+        using var cts = new CancellationTokenSource();
+        var cancelled = new CleanupSpyRepository(null!, failRelease: false);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            RunAsync(
+                job => job.SendAsync(tenantId, userId, 2016, 3, null, cts.Token),
+                cancelAfterClaim: cts,
+                wrapDeliveries: inner => cancelled = new CleanupSpyRepository(inner, failRelease: false)));
+
+        var releaseToken = Assert.Single(cancelled.ReleaseTokens);
+        Assert.True(releaseToken.CanBeCanceled);
+        Assert.False(releaseToken.IsCancellationRequested);
+        Assert.NotEqual(cts.Token, releaseToken);
+
+        var sent = new CleanupSpyRepository(null!, failRelease: false);
+        await RunAsync(
+            job => job.SendAsync(tenantId, userId, 2016, 3, null, CancellationToken.None),
+            wrapDeliveries: inner => sent = new CleanupSpyRepository(inner, failRelease: false));
+
+        var markSentToken = Assert.Single(sent.MarkSentTokens);
+        Assert.True(markSentToken.CanBeCanceled);
+        Assert.Equal(EmailDeliveryStatus.Sent, (await DeliveryAsync(tenantId, userId, "2016-Q3")).Status);
+    }
+
+    /// <summary>Records the tokens given to cleanup calls; can make freeing a claim fail like a database outage.</summary>
+    private sealed class CleanupSpyRepository(IEmailDeliveryRepository inner, bool failRelease) : IEmailDeliveryRepository
+    {
+        public List<CancellationToken> ReleaseTokens { get; } = [];
+
+        public List<CancellationToken> MarkSentTokens { get; } = [];
+
+        public Task<EmailDeliveryClaim> TryClaimAsync(
+            int tenantId, int userId, string quarter, DateTime nowUtc, TimeSpan lease, CancellationToken cancellationToken) =>
+            inner.TryClaimAsync(tenantId, userId, quarter, nowUtc, lease, cancellationToken);
+
+        public Task MarkSentAsync(EmailDeliveryClaim claim, DateTime nowUtc, AuditLog audit, CancellationToken cancellationToken)
+        {
+            MarkSentTokens.Add(cancellationToken);
+            return inner.MarkSentAsync(claim, nowUtc, audit, cancellationToken);
+        }
+
+        public Task ReleaseAsync(EmailDeliveryClaim claim, CancellationToken cancellationToken)
+        {
+            ReleaseTokens.Add(cancellationToken);
+            return failRelease
+                ? throw new InvalidOperationException("Database unavailable")
+                : inner.ReleaseAsync(claim, cancellationToken);
+        }
+    }
+
     private Task<QuarterlyReportEmailDelivery> DeliveryAsync(int tenantId, int userId, string quarter) =>
         factory.WithDbAsync(db => db.QuarterlyReportEmailDeliveries.AsNoTracking()
             .SingleAsync(d => d.TenantId == tenantId && d.UserId == userId && d.Quarter == quarter));
@@ -605,10 +705,13 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
         bool enabled = true,
         long maxAttachmentBytes = QuarterlyReportEmailOptions.MaxAllowedAttachmentBytes,
         CancellationTokenSource? cancelAfterClaim = null,
-        CancellationTokenSource? cancelOnTenantName = null) =>
+        CancellationTokenSource? cancelOnTenantName = null,
+        Func<IEmailDeliveryRepository, IEmailDeliveryRepository>? wrapDeliveries = null) =>
         factory.WithDbAsync(async db =>
         {
-            await action(CreateJob(db, enabled, maxAttachmentBytes, cancelAfterClaim: cancelAfterClaim, cancelOnTenantName: cancelOnTenantName));
+            await action(CreateJob(
+                db, enabled, maxAttachmentBytes,
+                cancelAfterClaim: cancelAfterClaim, cancelOnTenantName: cancelOnTenantName, wrapDeliveries: wrapDeliveries));
             return 0;
         });
 
@@ -618,15 +721,23 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
         long maxAttachmentBytes = QuarterlyReportEmailOptions.MaxAllowedAttachmentBytes,
         IAuditLogRepository? audits = null,
         CancellationTokenSource? cancelAfterClaim = null,
-        CancellationTokenSource? cancelOnTenantName = null) =>
-        new(
+        CancellationTokenSource? cancelOnTenantName = null,
+        Func<IEmailDeliveryRepository, IEmailDeliveryRepository>? wrapDeliveries = null)
+    {
+        IEmailDeliveryRepository deliveries = cancelAfterClaim is null
+            ? new EmailDeliveryRepository(db)
+            : new CancelAfterClaimRepository(new EmailDeliveryRepository(db), cancelAfterClaim);
+        if (wrapDeliveries is not null)
+        {
+            deliveries = wrapDeliveries(deliveries);
+        }
+
+        return new(
             new ReportRecipientRepository(db),
             cancelOnTenantName is null
                 ? new TenantRepository(db)
                 : new CancelOnTenantNameRepository(new TenantRepository(db), cancelOnTenantName),
-            cancelAfterClaim is null
-                ? new EmailDeliveryRepository(db)
-                : new CancelAfterClaimRepository(new EmailDeliveryRepository(db), cancelAfterClaim),
+            deliveries,
             audits ?? new AuditLogRepository(db, NullLogger<AuditLogRepository>.Instance),
             _sender,
             CreateCsvWriter(),
@@ -635,6 +746,7 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
             Options.Create(new QuarterlyReportEmailOptions { Enabled = enabled, MaxAttachmentBytes = maxAttachmentBytes }),
             TimeProvider.System,
             NullLogger<QuarterlyReportEmailJob>.Instance);
+    }
 
     private QuarterlyReportCsvWriter CreateCsvWriter() =>
         new(
