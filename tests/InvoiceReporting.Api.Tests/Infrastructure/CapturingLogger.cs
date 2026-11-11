@@ -16,7 +16,8 @@ public sealed class CapturingLogger<T> : ILogger<T>
         var entry = new LogEntry(
             logLevel,
             eventId,
-            (state as IEnumerable<KeyValuePair<string, object?>>)?.ToDictionary(p => p.Key, p => p.Value) ?? []);
+            (state as IEnumerable<KeyValuePair<string, object?>>)?.ToDictionary(p => p.Key, p => p.Value) ?? [],
+            exception);
 
         // Locked because the app can log from concurrent requests.
         lock (Entries)
@@ -25,5 +26,5 @@ public sealed class CapturingLogger<T> : ILogger<T>
         }
     }
 
-    public sealed record LogEntry(LogLevel Level, EventId EventId, IReadOnlyDictionary<string, object?> State);
+    public sealed record LogEntry(LogLevel Level, EventId EventId, IReadOnlyDictionary<string, object?> State, Exception? Exception);
 }

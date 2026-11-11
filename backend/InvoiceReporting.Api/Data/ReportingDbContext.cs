@@ -7,6 +7,9 @@ public sealed class ReportingDbContext(DbContextOptions<ReportingDbContext> opti
 {
     public const int TenantKeyMaxLength = 32;
 
+    /// <summary>Unique index allowing one "generated" audit entry per tenant and quarter.</summary>
+    public const string QuarterlyReportGeneratedIndexName = "IX_AuditLogs_QuarterlyReportGenerated";
+
     public DbSet<Tenant> Tenants => Set<Tenant>();
 
     public DbSet<Invoice> Invoices => Set<Invoice>();
@@ -61,7 +64,7 @@ public sealed class ReportingDbContext(DbContextOptions<ReportingDbContext> opti
             audit.HasIndex(a => new { a.TenantId, a.Action, a.Detail })
                 .IsUnique()
                 .HasFilter($"[Action] = '{AuditActions.GenerateQuarterlyInvoiceReport}'")
-                .HasDatabaseName("IX_AuditLogs_QuarterlyReportGenerated");
+                .HasDatabaseName(QuarterlyReportGeneratedIndexName);
 
             // Kept on purpose: the index above is filtered, so it cannot serve
             // the tenant foreign key, but EF would otherwise drop this one.

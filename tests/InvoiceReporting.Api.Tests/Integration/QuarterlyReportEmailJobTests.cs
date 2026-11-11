@@ -627,7 +627,7 @@ public sealed class QuarterlyReportEmailJobTests(InvoiceReportApiFactory factory
             cancelAfterClaim is null
                 ? new EmailDeliveryRepository(db)
                 : new CancelAfterClaimRepository(new EmailDeliveryRepository(db), cancelAfterClaim),
-            audits ?? new AuditLogRepository(db),
+            audits ?? new AuditLogRepository(db, NullLogger<AuditLogRepository>.Instance),
             _sender,
             CreateCsvWriter(),
             new FailedReportEmailLog(_failedLog),

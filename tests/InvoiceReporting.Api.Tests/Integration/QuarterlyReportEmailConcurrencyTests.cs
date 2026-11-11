@@ -95,7 +95,7 @@ public sealed class QuarterlyReportEmailConcurrencyTests : IAsyncLifetime, IDisp
             new ReportRecipientRepository(db),
             new TenantRepository(db),
             new EmailDeliveryRepository(db),
-            new AuditLogRepository(db),
+            new AuditLogRepository(db, NullLogger<AuditLogRepository>.Instance),
             _sender,
             CreateCsvWriter(),
             new FailedReportEmailLog(NullLoggerFactory.Instance),

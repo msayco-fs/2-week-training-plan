@@ -76,7 +76,7 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         var (result, invoices, audits) = await factory.WithDbAsync(async db =>
         {
             var invoices = new CapturingInvoiceRepository(new InvoiceRepository(db));
-            var audits = new CapturingAuditLogRepository(new AuditLogRepository(db));
+            var audits = new CapturingAuditLogRepository(new AuditLogRepository(db, NullLogger<AuditLogRepository>.Instance));
             var result = await CreateJob(db, invoices, audits).RunAsync(tenantId, 2019, 1, cts.Token);
             return (result, invoices, audits);
         });
@@ -184,7 +184,7 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         await factory.WithDbAsync(db => CreateJob(db).RunAsync(tenantId, 2019, 4, CancellationToken.None));
 
         var result = await factory.WithDbAsync(db =>
-            CreateJob(db, audits: new CapturingAuditLogRepository(new AuditLogRepository(db), missFirstCheck: true))
+            CreateJob(db, audits: new CapturingAuditLogRepository(new AuditLogRepository(db, NullLogger<AuditLogRepository>.Instance), missFirstCheck: true))
                 .RunAsync(tenantId, 2019, 4, CancellationToken.None));
 
         Assert.Equal(QuarterlyReportRunResult.AlreadyGenerated, result);
@@ -246,7 +246,7 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
 
         var (first, second) = await factory.WithDbAsync(async db =>
         {
-            var repository = new AuditLogRepository(db);
+            var repository = new AuditLogRepository(db, NullLogger<AuditLogRepository>.Instance);
             return (
                 await repository.TryAddUniqueAsync(Entry(tenantId, Domain.AuditActions.GenerateQuarterlyInvoiceReport, "2018-Q1"), CancellationToken.None),
                 await repository.TryAddUniqueAsync(Entry(tenantId, Domain.AuditActions.GenerateQuarterlyInvoiceReport, "2018-Q1"), CancellationToken.None));
@@ -258,7 +258,7 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         // The index is filtered to the "generated" action only.
         await factory.WithDbAsync(async db =>
         {
-            var repository = new AuditLogRepository(db);
+            var repository = new AuditLogRepository(db, NullLogger<AuditLogRepository>.Instance);
             await repository.AddAsync(Entry(tenantId, Domain.AuditActions.ViewMonthlyInvoices, "2018-01"), CancellationToken.None);
             await repository.AddAsync(Entry(tenantId, Domain.AuditActions.ViewMonthlyInvoices, "2018-01"), CancellationToken.None);
             return 0;
@@ -285,7 +285,7 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
             factory.Services.GetRequiredService<IHostEnvironment>());
         return new QuarterlyReportJob(
             invoices ?? new InvoiceRepository(db),
-            audits ?? new AuditLogRepository(db),
+            audits ?? new AuditLogRepository(db, NullLogger<AuditLogRepository>.Instance),
             TimeProvider.System, writer, _jobs, NullLogger<QuarterlyReportJob>.Instance);
     }
 
