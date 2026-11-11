@@ -1,0 +1,9 @@
+M:System.Threading.Tasks.Task.Run(System.Action);Await the async API instead. Task.Run only moves blocking work to another pool thread.
+M:System.Threading.Tasks.Task.Run(System.Action,System.Threading.CancellationToken);Await the async API instead. Task.Run only moves blocking work to another pool thread.
+M:System.Threading.Tasks.Task.Run(System.Func{System.Threading.Tasks.Task});Await the async API instead. Task.Run only moves blocking work to another pool thread.
+M:System.Threading.Tasks.Task.Run(System.Func{System.Threading.Tasks.Task},System.Threading.CancellationToken);Await the async API instead. Task.Run only moves blocking work to another pool thread.
+M:System.Threading.Tasks.Task.Run``1(System.Func{``0});Await the async API instead. Task.Run only moves blocking work to another pool thread.
+M:System.Threading.Tasks.Task.Run``1(System.Func{``0},System.Threading.CancellationToken);Await the async API instead. Task.Run only moves blocking work to another pool thread.
+M:System.Threading.Tasks.Task.Run``1(System.Func{System.Threading.Tasks.Task{``0}});Await the async API instead. Task.Run only moves blocking work to another pool thread.
+M:System.Threading.Tasks.Task.Run``1(System.Func{System.Threading.Tasks.Task{``0}},System.Threading.CancellationToken);Await the async API instead. Task.Run only moves blocking work to another pool thread.
+T:System.Threading.Tasks.TaskFactory;Same as Task.Run (Task.Factory.StartNew). Await the async API instead.

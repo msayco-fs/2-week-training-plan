@@ -336,8 +336,15 @@ send. The invoices are streamed (`IAsyncEnumerable<InvoiceSummary>` read with
 large quarter is never held in memory. The database query stays open while
 the file is written.
 
-`NoBlockingCallsTests` fails the build on `.Result`, `.Wait()`,
-`GetAwaiter().GetResult()`, `Task.Run` or `async void` in `backend/`.
+The backend build fails on blocking async code. Rules from
+`Microsoft.VisualStudio.Threading.Analyzers` are set to errors in the API's
+`.csproj`: VSTHRD002 (`.Result`, `.Wait()`, `Task.WaitAll`/`WaitAny`,
+`GetAwaiter().GetResult()`), VSTHRD100 (`async void`) and VSTHRD103 (a sync
+call inside an async method where an async version exists).
+`Microsoft.CodeAnalysis.BannedApiAnalyzers` bans `Task.Run` and `TaskFactory`
+through `backend/InvoiceReporting.Api/BannedSymbols.txt` (error RS0030). These
+rules check types, not names, so renamed variables and calls split across
+lines are still caught.
 
 A few calls stay synchronous on purpose. .NET has no async version of them,
 and wrapping them in `Task.Run` would only move the wait to another thread.

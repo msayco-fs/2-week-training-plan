@@ -5,6 +5,15 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>59fc2abc-ec16-4108-acb4-fbdd40317669</UserSecretsId>
+    <!-- The API is async end to end. These fail the build: blocking on a task
+         (VSTHRD002: .Result, .Wait, WaitAll/WaitAny, GetAwaiter().GetResult()),
+         async void (VSTHRD100), a sync call where an async one exists in an
+         async method (VSTHRD103), and the APIs in BannedSymbols.txt (RS0030).
+         The rules check types, not names. -->
+    <WarningsAsErrors>$(WarningsAsErrors);VSTHRD002;VSTHRD100;VSTHRD103;RS0030</WarningsAsErrors>
+    <!-- "Async" suffix: only hits controller actions, and ASP.NET removes
+         that suffix from action names anyway. -->
+    <NoWarn>$(NoWarn);VSTHRD200</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -22,6 +31,13 @@
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
     <PackageReference Include="Serilog.Sinks.Map" Version="2.0.0" />
     <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
+  </ItemGroup>
+
+  <!-- Build-time checks only; PrivateAssets keeps them out of the test project. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" Version="5.6.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.VisualStudio.Threading.Analyzers" Version="18.12.1" PrivateAssets="all" />
+    <AdditionalFiles Include="BannedSymbols.txt" />
   </ItemGroup>
 
 </Project>
