@@ -348,7 +348,9 @@ transfer:
 | --- | --- | --- |
 | `Directory.CreateDirectory` | `QuarterlyReportCsvWriter`, `FailedReportEmailLogFile` | Returns at once when the folder exists, which is every run after the first. |
 | `File.Move(temp, path, overwrite: true)` | `QuarterlyReportCsvWriter` | A rename on the same volume. It is what makes the report replace atomic. |
-| `File.Delete` | `QuarterlyReportCsvWriter` (temp cleanup), `FailedReportEmailLogFile` (retention) | Cleanup only. Failures are ignored and retried on the next run or day. |
+| `File.Delete` | `QuarterlyReportCsvWriter` (temp cleanup, stale temp files after each schedule run), `FailedReportEmailLogFile` (retention) | Cleanup only. Failures are ignored and retried on the next run or day. |
+| `Directory.EnumerateFiles`, `FileInfo` | `QuarterlyReportCsvWriter.DeleteStaleTempFiles` | Lists one folder once per quarter to find stale temp files. |
+| `IMonitoringApi` (processing, scheduled, enqueued jobs) | `HangfireQuarterlyReportActivity` | Hangfire's API is synchronous. Read once every 5 minutes, only while the cleanup waits. |
 | `File.Exists` | `QuarterlyReportEmailJob` | Checks the CSV is there before claiming the email. |
 | `File.GetLastWriteTime` | `QuarterlyReportZip` | Sets the zip entry's date. |
 | `new FileInfo(path).Length` | `QuarterlyReportEmailJob` | Only in the "too large" log message. |

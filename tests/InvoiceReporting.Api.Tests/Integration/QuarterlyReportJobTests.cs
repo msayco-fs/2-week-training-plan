@@ -129,7 +129,7 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
         // depends on where the cancel is first seen: by EF Core or the file write.
         Assert.InRange(invoices!.RowsRead, 1, 2);
         Assert.False(File.Exists(CsvPath(tenantId, "2019-Q3")));
-        Assert.False(File.Exists(CsvPath(tenantId, "2019-Q3") + ".tmp"));
+        Assert.Empty(Directory.GetFiles(_outputDirectory, "*.tmp"));
         Assert.Empty(_jobs.Created);
         Assert.False(await GeneratedAuditExistsAsync(tenantId, "2019-Q3"));
     }
@@ -192,6 +192,50 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
             a.TenantId == tenantId && a.Action == Domain.AuditActions.GenerateQuarterlyInvoiceReport && a.Detail == "2019-Q4"));
         Assert.Equal(1, entries);
         // Both runs still queue the emails; each send job skips people already emailed.
+        Assert.Equal(2, _jobs.Created.Count);
+    }
+
+    /// <summary>
+    /// Two runs for the same quarter at the same time. The first passes the
+    /// "already generated" check, opens its temp file and is held before
+    /// reading any invoice. The second runs start to finish. Before each run
+    /// had its own temp file, the second run failed here with an IOException.
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_TwoRunsForTheSameQuarterAtOnce_OneGenerates_OneReportsAlreadyGenerated_AndTheCsvIsComplete()
+    {
+        var tenantId = await TenantAIdAsync();
+        await AddInvoicesAsync(tenantId, new DateOnly(2018, 7, 1), 3);
+        var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var first = factory.WithDbAsync(db =>
+            CreateJob(db, new HeldInvoiceRepository(new InvoiceRepository(db), firstStarted, releaseFirst))
+                .RunAsync(tenantId, 2018, 3, CancellationToken.None));
+        QuarterlyReportRunResult second;
+        try
+        {
+            await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            second = await factory.WithDbAsync(db => CreateJob(db).RunAsync(tenantId, 2018, 3, CancellationToken.None));
+        }
+        finally
+        {
+            releaseFirst.TrySetResult();
+        }
+
+        var firstResult = await first;
+
+        // The second run saved the audit entry first; the unique index turns the first into "already generated".
+        Assert.Equal(QuarterlyReportRunResult.Generated, second);
+        Assert.Equal(QuarterlyReportRunResult.AlreadyGenerated, firstResult);
+        var entries = await factory.WithDbAsync(db => db.AuditLogs.CountAsync(a =>
+            a.TenantId == tenantId && a.Action == Domain.AuditActions.GenerateQuarterlyInvoiceReport && a.Detail == "2018-Q3"));
+        Assert.Equal(1, entries);
+        var lines = await File.ReadAllLinesAsync(CsvPath(tenantId, "2018-Q3"));
+        Assert.Equal(5, lines.Length); // Header, 3 rows, total.
+        Assert.Equal("Total,,,6.00", lines[^1]);
+        Assert.Empty(Directory.GetFiles(_outputDirectory, "*.tmp"));
+        // Both runs queue the emails; each send job skips people already emailed.
         Assert.Equal(2, _jobs.Created.Count);
     }
 
@@ -283,6 +327,31 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
                 RowsRead++;
                 yield return invoice;
                 afterEachRow?.Invoke();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Holds the invoice stream before the first row until released. It waits
+    /// before opening the database query, so the other run can use the shared
+    /// test connection in the meantime.
+    /// </summary>
+    private sealed class HeldInvoiceRepository(
+        IInvoiceRepository inner, TaskCompletionSource started, TaskCompletionSource release) : IInvoiceRepository
+    {
+        public Task<IReadOnlyList<InvoiceSummary>> GetSummariesAsync(
+            int tenantId, DateOnly fromInclusive, DateOnly toExclusive, CancellationToken cancellationToken) =>
+            inner.GetSummariesAsync(tenantId, fromInclusive, toExclusive, cancellationToken);
+
+        public async IAsyncEnumerable<InvoiceSummary> StreamSummariesAsync(
+            int tenantId, DateOnly fromInclusive, DateOnly toExclusive,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            started.TrySetResult();
+            await release.Task.WaitAsync(cancellationToken);
+            await foreach (var invoice in inner.StreamSummariesAsync(tenantId, fromInclusive, toExclusive, cancellationToken))
+            {
+                yield return invoice;
             }
         }
     }

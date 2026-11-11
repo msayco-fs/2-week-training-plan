@@ -16,8 +16,14 @@ public static class QuarterlyReportingSetup
     {
         services.AddScoped<QuarterlyReportScheduler>();
         services.AddScoped<QuarterlyReportJob>();
-        services.Configure<QuarterlyReportOutputOptions>(
-            configuration.GetSection(QuarterlyReportOutputOptions.SectionName));
+        services.AddOptions<QuarterlyReportOutputOptions>()
+            .Bind(configuration.GetSection(QuarterlyReportOutputOptions.SectionName))
+            .Validate(
+                options => options.StaleTempFileAge >= QuarterlyReportOutputOptions.MinStaleTempFileAge,
+                "Reporting:QuarterlyOutput:StaleTempFileAge must be at least 1 hour, so a report still being written is never deleted.")
+            .ValidateOnStart();
+        services.AddScoped<QuarterlyReportTempFileCleanupJob>();
+        services.AddSingleton<IQuarterlyReportActivity, HangfireQuarterlyReportActivity>();
         services.AddSingleton<QuarterlyReportCsvWriter>();
 
         services.AddScoped<QuarterlyReportEmailJob>();

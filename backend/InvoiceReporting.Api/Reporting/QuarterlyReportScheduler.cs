@@ -39,5 +39,11 @@ public sealed class QuarterlyReportScheduler(
             jobs.Enqueue<QuarterlyReportJob>(job =>
                 job.RunAsync(tenantId, quarter.Year, quarter.Number, CancellationToken.None));
         }
+
+        // Every tenant is queued. The cleanup waits until this run and every
+        // report job have finished, then clears temp files left by runs that were killed.
+        cancellationToken.ThrowIfCancellationRequested();
+        var giveUpAt = timeProvider.GetUtcNow() + QuarterlyReportTempFileCleanupJob.MaxWait;
+        jobs.Enqueue<QuarterlyReportTempFileCleanupJob>(job => job.Run(giveUpAt, CancellationToken.None));
     }
 }

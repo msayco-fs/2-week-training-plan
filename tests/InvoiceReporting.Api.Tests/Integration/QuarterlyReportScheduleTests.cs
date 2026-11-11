@@ -24,7 +24,7 @@ public sealed class QuarterlyReportScheduleTests(InvoiceReportApiFactory factory
     }
 
     [Fact]
-    public async Task QueueAllTenantsAsync_QueuesOneReportPerTenant()
+    public async Task QueueAllTenantsAsync_QueuesOneReportPerTenant_ThenTheTempFileCleanup()
     {
         var jobs = new FakeBackgroundJobClient();
 
@@ -36,8 +36,18 @@ public sealed class QuarterlyReportScheduleTests(InvoiceReportApiFactory factory
         });
 
         var tenantCount = await factory.WithDbAsync(db => db.Tenants.CountAsync());
-        Assert.Equal(tenantCount, jobs.Created.Count);
-        Assert.All(jobs.Created, job => Assert.Equal(nameof(QuarterlyReportJob.RunAsync), job.Method.Name));
+        Assert.Equal(tenantCount + 1, jobs.Created.Count);
+        Assert.All(jobs.Created[..^1], job => Assert.Equal(nameof(QuarterlyReportJob.RunAsync), job.Method.Name));
+
+        // The cleanup is queued last, only after every tenant.
+        var cleanup = jobs.Created[^1];
+        Assert.Equal(typeof(QuarterlyReportTempFileCleanupJob), cleanup.Type);
+        Assert.Equal(nameof(QuarterlyReportTempFileCleanupJob.Run), cleanup.Method.Name);
+        var giveUpAt = Assert.IsType<DateTimeOffset>(cleanup.Args[0]);
+        Assert.InRange(
+            giveUpAt - DateTimeOffset.UtcNow,
+            QuarterlyReportTempFileCleanupJob.MaxWait - TimeSpan.FromMinutes(1),
+            QuarterlyReportTempFileCleanupJob.MaxWait);
     }
 
     [Fact]
