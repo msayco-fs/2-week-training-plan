@@ -333,8 +333,8 @@ public sealed class QuarterlyReportJobTests(InvoiceReportApiFactory factory)
 
     /// <summary>
     /// Holds the invoice stream before the first row until released. It waits
-    /// before opening the database query, so the other run can use the shared
-    /// test connection in the meantime.
+    /// before opening the database query, so the held run uses no database
+    /// connection while the other run goes start to finish.
     /// </summary>
     private sealed class HeldInvoiceRepository(
         IInvoiceRepository inner, TaskCompletionSource started, TaskCompletionSource release) : IInvoiceRepository

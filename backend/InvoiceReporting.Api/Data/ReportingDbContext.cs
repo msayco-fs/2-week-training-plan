@@ -43,7 +43,7 @@ public sealed class ReportingDbContext(DbContextOptions<ReportingDbContext> opti
             // quarterly reports. CustomerName and Amount are included so SQL
             // Server answers the report query from this index alone (an index
             // seek, already in date order). Without them it scans and sorts the
-            // whole table for every tenant. SQLite ignores the INCLUDE.
+            // whole table for every tenant.
             invoice.HasIndex(i => new { i.TenantId, i.IssuedDate })
                 .IncludeProperties(i => new { i.CustomerName, i.Amount });
         });
@@ -56,8 +56,8 @@ public sealed class ReportingDbContext(DbContextOptions<ReportingDbContext> opti
 
             // At most one "generated" entry per tenant and quarter, so two
             // report runs at once cannot both record the quarter. Other
-            // actions may repeat. Plain quotes, not N'', so SQLite (tests)
-            // accepts the same filter as SQL Server.
+            // actions may repeat. Plain quotes: the filter is stored in the
+            // migration as written, so changing it means a new migration.
             audit.HasIndex(a => new { a.TenantId, a.Action, a.Detail })
                 .IsUnique()
                 .HasFilter($"[Action] = '{AuditActions.GenerateQuarterlyInvoiceReport}'")

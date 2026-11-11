@@ -48,7 +48,7 @@ day-03-threat-model.md            STRIDE-lite threat model and repository sweep
 | .NET SDK / target framework | 10.0.401 / `net10.0` |
 | ASP.NET Core, EF Core, JwtBearer, Mvc.Testing | 10.0.13 |
 | Database provider (app) | SQL Server (`Microsoft.EntityFrameworkCore.SqlServer`) |
-| Database provider (tests) | SQLite in-memory (`Microsoft.EntityFrameworkCore.Sqlite`) |
+| Database provider (tests) | SQL Server 2022 in Docker, via Testcontainers (`Testcontainers.MsSql`) |
 | xUnit | 2.9.3 |
 | Node.js / npm | 24.x / 11.19.0 |
 | Angular / Angular CLI | 22.2 |
@@ -617,7 +617,9 @@ The front end is the unchanged Angular starter. It does not call the API yet.
 
 ## Build, lint and test
 
-These are the same commands CI runs.
+These are the same commands CI runs. The backend tests need Docker running
+(Docker Desktop on Windows and macOS). The first run downloads the SQL Server
+image (about 1.5 GB).
 
 ```bash
 # Backend
@@ -652,12 +654,14 @@ dotnet test InvoiceReporting.slnx --filter "FullyQualifiedName~TenantAuthorizati
 
 ### Test database
 
-Integration tests use a private SQLite in-memory database per test class,
-created and seeded with fixed fictitious data. SQLite enforces foreign keys and
-unique indexes and runs real SQL. It does **not** check SQL Server behavior
-such as collation, `decimal(18,2)` precision or query plans. The SQL Server
-path, and the real JWT bearer path (including the `PlatformAdmin` role claim
-from `dotnet user-jwts --role`), were checked by hand against LocalDB.
+Integration tests run against SQL Server 2022 in a Docker container started by
+Testcontainers, the same image as `docker-compose.yml`. One container serves
+the whole test run, and each test class gets its own database, created by the
+real EF Core migrations and seeded with fixed fictitious data. So the tests
+check the same collation, `decimal(18,2)` precision, filtered unique index and
+error numbers as production, and they fail if a migration breaks. The real JWT
+bearer path (including the `PlatformAdmin` role claim from
+`dotnet user-jwts --role`) was checked by hand.
 
 Tests authenticate with `TestAuthHandler`, not JWT bearer, so automated tests
 do not cover token validation or the JWT claim mapping.

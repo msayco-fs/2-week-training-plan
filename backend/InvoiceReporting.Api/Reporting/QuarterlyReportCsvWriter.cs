@@ -42,8 +42,7 @@ public sealed class QuarterlyReportCsvWriter(
         Directory.CreateDirectory(OutputDirectory);
         var path = GetPath(tenantId, quarter);
 
-        // Summed here, in C#, like the monthly report: SQLite (used in tests)
-        // cannot aggregate decimal columns.
+        // Summed while each row is written, so the total needs no second query.
         var count = 0;
         var total = 0m;
 

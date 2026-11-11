@@ -3,7 +3,6 @@ using InvoiceReporting.Api.Data.Repositories;
 using InvoiceReporting.Api.Domain;
 using InvoiceReporting.Api.Reporting;
 using InvoiceReporting.Api.Tests.Infrastructure;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting.Internal;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -16,37 +15,27 @@ namespace InvoiceReporting.Api.Tests.Integration;
 /// when the CSV job re-queues recipients on a retry.
 /// </summary>
 /// <remarks>
-/// Uses a temporary SQLite file, not the shared in-memory connection used by
-/// other tests. One SQLite connection must not be used by two threads at
-/// once. With a file, each job opens its own connection, and SQLite lets one
-/// writer in at a time while the others wait, like a real database server.
+/// Uses its own database, so these jobs' claims never mix with other tests'
+/// data. Each job opens its own connection, as in production.
 /// </remarks>
-public sealed class QuarterlyReportEmailConcurrencyTests : IDisposable
+public sealed class QuarterlyReportEmailConcurrencyTests : IAsyncLifetime, IDisposable
 {
     private const int ConcurrentJobs = 8;
 
     private readonly string _directory =
         Path.Combine(Path.GetTempPath(), "invoice-reporting-tests", Guid.NewGuid().ToString("N"));
 
-    private readonly DbContextOptions<ReportingDbContext> _dbOptions;
+    private DbContextOptions<ReportingDbContext> _dbOptions = null!;
     private readonly FakeReportEmailSender _sender = new();
 
-    public QuarterlyReportEmailConcurrencyTests()
+    public async Task InitializeAsync()
     {
         Directory.CreateDirectory(_directory);
-
-        // Pooling off, so no connection keeps the file open after the test.
-        var connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = Path.Combine(_directory, "reporting.db"),
-            Pooling = false,
-        }.ToString();
-        _dbOptions = new DbContextOptionsBuilder<ReportingDbContext>().UseSqlite(connectionString).Options;
-
-        using var db = new ReportingDbContext(_dbOptions);
-        db.Database.EnsureCreated();
-        TestData.Seed(db);
+        _dbOptions = new DbContextOptionsBuilder<ReportingDbContext>()
+            .UseSqlServer(await SqlServerTestDatabase.CreateAsync()).Options;
     }
+
+    public Task DisposeAsync() => Task.CompletedTask;
 
     [Fact]
     public async Task ManyJobsForTheSameEmailAtOnce_SendExactlyOneEmail()
